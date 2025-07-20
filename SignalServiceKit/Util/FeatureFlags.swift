@@ -53,6 +53,8 @@ public enum FeatureFlags {
         public static let detailedBenchLogging = build.includes(.internal)
         public static let errorDisplay = build.includes(.internal)
 
+        public static let avoidStoreKitForTesters = build.includes(.beta)
+
         public static let settings = build.includes(.dev)
     }
 
@@ -64,6 +66,10 @@ public enum FeatureFlags {
     public static let libsignalEnforceMinTlsVersion = false
 
     public static let notificationServiceWebSocket = build.includes(.internal)
+
+    public static let moveDraftsUpChatList = build.includes(.internal)
+
+    public static let inactivePrimaryDeviceMegaphone = build.includes(.dev)
 }
 
 // MARK: -

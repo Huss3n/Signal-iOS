@@ -57,15 +57,15 @@ public class MessageProcessor {
 
         SwiftSingletons.register(self)
 
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(registrationStateDidChange),
-            name: .registrationStateDidChange,
-            object: nil
-        )
-
         appReadiness.runNowOrWhenAppDidBecomeReadySync {
             SSKEnvironment.shared.messagePipelineSupervisorRef.register(pipelineStage: self)
+
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(self.registrationStateDidChange),
+                name: .registrationStateDidChange,
+                object: nil
+            )
         }
     }
 
@@ -321,9 +321,7 @@ public class MessageProcessor {
 
     @objc
     private func registrationStateDidChange() {
-        appReadiness.runNowOrWhenAppDidBecomeReadySync {
-            self.drainPendingEnvelopes()
-        }
+        self.drainPendingEnvelopes()
     }
 }
 
@@ -613,8 +611,6 @@ public enum EnvelopeSource {
     case websocketIdentified
     case websocketUnidentified
     case rest
-    // We re-decrypt incoming messages after accepting a safety number change.
-    case identityChangeError
     case debugUI
     case tests
 }

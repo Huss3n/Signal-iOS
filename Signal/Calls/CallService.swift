@@ -47,6 +47,10 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
 
     private var adHocCallStateObserver: AdHocCallStateObserver?
 
+    public class func serverPublicParams() -> ServerPublicParams {
+        return try! ServerPublicParams(contents: TSConstants.serverPublicParams)
+    }
+
     /// Needs to be lazily initialized, because it uses singletons that are not
     /// available when this class is initialized.
     private lazy var groupCallAccessoryMessageDelegate: GroupCallAccessoryMessageDelegate = {
@@ -142,9 +146,6 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
         notificationObservers.append(NotificationCenter.default.addObserver(forName: Self.callServicePreferencesDidChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.configureDataMode() }
         })
-        notificationObservers.append(NotificationCenter.default.addObserver(forName: .registrationStateDidChange, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.registrationChanged() }
-        })
 
         // Note that we're not using the usual .owsReachabilityChanged
         // We want to update our data mode if the app has been backgrounded
@@ -164,6 +165,9 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
             if let localAci = DependenciesBridge.shared.tsAccountManager.localIdentifiersWithMaybeSneakyTransaction?.aci {
                 self.callManager.setSelfUuid(localAci.rawUUID)
             }
+            self.notificationObservers.append(NotificationCenter.default.addObserver(forName: .registrationStateDidChange, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.registrationChanged() }
+            })
         }
 
         appReadiness.runNowOrWhenAppDidBecomeReadyAsync {
@@ -198,7 +202,7 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
 
     @MainActor
     private func rebuildCallUIAdapterIfNeeded() {
-        guard self.shouldRebuildCallUIAdapter else {
+        guard self.shouldRebuildCallUIAdapter, self.callServiceState.currentCall == nil else {
             return
         }
         self.shouldRebuildCallUIAdapter = false
@@ -263,10 +267,8 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
             }
         }
 
-        if newValue == nil {
-            MainActor.assumeIsolated {
-                self.rebuildCallUIAdapterIfNeeded()
-            }
+        MainActor.assumeIsolated {
+            self.rebuildCallUIAdapterIfNeeded()
         }
 
         switch newValue?.mode {
@@ -591,6 +593,7 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
             let callLinkRecord = try callLinkStore.fetch(roomId: callLink.rootKey.deriveRoomId(), tx: tx)
             return (callLinkRecord?.adminPasskey, callLinkRecord?.isDeleted == true)
         }
+        let serverPublicParams = CallService.serverPublicParams()
         if isDeleted {
             throw OWSGenericError("Can't join a call link that you've deleted.")
         }
@@ -601,6 +604,7 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
             let authCredentialPresentation = authCredential.present(callLinkParams: secretParams)
             let ringRtcCall = callManager.createCallLinkCall(
                 sfuUrl: sfuUrl,
+                endorsementPublicKey: serverPublicParams.endorsementPublicKey,
                 authCredentialPresentation: [UInt8](authCredentialPresentation.serialize()),
                 linkRootKey: callLink.rootKey,
                 adminPasskey: adminPasskey,
@@ -730,8 +734,11 @@ final class CallService: CallServiceStateObserver, CallServiceStateDelegate {
             owsFail("Can't start a call if there's no view controller")
         }
 
-        let prepareResult = await CallStarter.prepareToStartCall(from: frontmostViewController, shouldAskForCameraPermission: isVideo)
-        guard let prepareResult else {
+        let prepareResult: CallStarter.PrepareToStartCallResult
+        do throws(CallStarter.PrepareToStartCallError) {
+            prepareResult = try await CallStarter.prepareToStartCall(from: frontmostViewController, shouldAskForCameraPermission: isVideo)
+        } catch {
+            CallStarter.showPrepareToStartCallError(error, from: frontmostViewController)
             return
         }
 
@@ -1545,7 +1552,7 @@ extension CallService: CallManagerDelegate {
 
             guard GroupMessageProcessorManager.discardMode(
                 forMessageFrom: senderAci,
-                groupId: groupId.serialize(),
+                groupId: groupId,
                 tx: transaction
             ) == .doNotDiscard else {
                 Logger.warn("discarding group ring \(ringId) from \(senderAci)")
@@ -1577,7 +1584,7 @@ extension CallService: CallManagerDelegate {
             }
         case .ring(let groupId):
             let currentCall = self.callServiceState.currentCall
-            if case .groupThread(let call) = currentCall?.mode, call.groupId.serialize() == groupId.serialize() {
+            if case .groupThread(let call) = currentCall?.mode, call.groupId == groupId {
                 // We're already ringing or connected, or at the very least already in the lobby.
                 return
             }

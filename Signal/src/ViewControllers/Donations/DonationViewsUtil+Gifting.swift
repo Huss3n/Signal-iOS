@@ -31,11 +31,6 @@ extension DonationViewsUtil {
             case userCanceledBeforeChargeCompleted
         }
 
-        enum SafetyNumberConfirmationResult {
-            case userDidNotConfirmSafetyNumberChange
-            case userConfirmedSafetyNumberChangeOrNoChangeWasNeeded
-        }
-
         /// Throw if the user is already sending a gift to this person. This should be checked
         /// before sending a gift as the first step.
         ///
@@ -108,33 +103,17 @@ extension DonationViewsUtil {
         /// Show a safety number sheet if necessary for the thread.
         ///
         /// Because some screens care, returns the promise and whether the user needs to intervene.
+        @MainActor
         static func showSafetyNumberConfirmationIfNecessary(
-            for thread: TSContactThread
-        ) -> (needsUserInteraction: Bool, promise: Promise<SafetyNumberConfirmationResult>) {
-            let (promise, future) = Promise<SafetyNumberConfirmationResult>.pending()
-
-            let needsUserInteraction = SafetyNumberConfirmationSheet.presentIfNecessary(
-                address: thread.contactAddress,
-                confirmationText: SafetyNumberStrings.confirmSendButton
-            ) { didConfirm in
-                if didConfirm {
-                    // After confirming, show it again if it changed *again*.
-                    future.resolve(
-                        on: DispatchQueue.main,
-                        with: showSafetyNumberConfirmationIfNecessary(for: thread).promise
-                    )
-                } else {
-                    future.resolve(.userDidNotConfirmSafetyNumberChange)
-                }
-            }
-            if needsUserInteraction {
-                Logger.info("[Gifting] Showing safety number confirmation sheet")
-            } else {
-                Logger.info("[Gifting] Not showing safety number confirmation sheet; it was not needed")
-                future.resolve(.userConfirmedSafetyNumberChangeOrNoChangeWasNeeded)
-            }
-
-            return (needsUserInteraction: needsUserInteraction, promise: promise)
+            for thread: TSContactThread,
+            didPresent: @MainActor () -> Void = {},
+        ) async -> Bool {
+            await SafetyNumberConfirmationSheet.presentRepeatedlyAsNecessary(
+                for: { [thread.contactAddress] },
+                from: CurrentAppContext().frontmostViewController()!,
+                confirmationText: SafetyNumberStrings.confirmSendButton,
+                didPresent: didPresent,
+            )
         }
 
         /// Runs the gifting job.
@@ -160,8 +139,8 @@ extension DonationViewsUtil {
             messageText: String,
             databaseStorage: SDSDatabaseStorage,
             blockingManager: BlockingManager,
-            onChargeSucceeded: @escaping () -> Void = {}
-        ) -> Promise<Void> {
+            onChargeSucceeded: @MainActor () -> Void = {}
+        ) async throws {
             let jobRecord = SendGiftBadgeJobQueue.createJob(
                 preparedPayment: preparedPayment,
                 receiptRequest: DonationSubscriptionManager.generateReceiptRequest(),
@@ -169,22 +148,20 @@ extension DonationViewsUtil {
                 thread: thread,
                 messageText: messageText
             )
-            return Promise.wrapAsync {
-                let chargePromise: Promise<Void>
-                let completionPromise: Promise<Void>
-                (chargePromise, completionPromise) = try await databaseStorage.awaitableWrite { tx in
-                    if blockingManager.isAddressBlocked(thread.contactAddress, transaction: tx) {
-                        throw SendGiftError.recipientIsBlocked
-                    }
-                    return DonationUtilities.sendGiftBadgeJobQueue.addJob(jobRecord, tx: tx)
+            let chargePromise: Promise<Void>
+            let completionPromise: Promise<Void>
+            (chargePromise, completionPromise) = try await databaseStorage.awaitableWrite { tx in
+                if blockingManager.isAddressBlocked(thread.contactAddress, transaction: tx) {
+                    throw SendGiftError.recipientIsBlocked
                 }
-                do {
-                    try await chargePromise.awaitable()
-                    await MainActor.run { onChargeSucceeded() }
-                    try await completionPromise.awaitable()
-                } catch {
-                    throw SendGiftError.failedAndUserMaybeCharged
-                }
+                return DonationUtilities.sendGiftBadgeJobQueue.addJob(jobRecord, tx: tx)
+            }
+            do {
+                try await chargePromise.awaitable()
+                await onChargeSucceeded()
+                try await completionPromise.awaitable()
+            } catch {
+                throw SendGiftError.failedAndUserMaybeCharged
             }
         }
 

@@ -563,6 +563,9 @@ extension BackupArchive {
                 /// An invalid member (group, distribution list, etc) was specified as a distribution list member.  Includes the offending proto
                 case invalidDistributionListMember(protoClass: Any.Type)
 
+                /// The backup tier in account settings was set but not able to be parsed by libsignal.
+                case invalidBackupTier
+
                 /// A ``BackupProto/Contact`` with no aci, pni, or e164.
                 case contactWithoutIdentifiers
                 /// A ``BackupProto/Contact`` for the local user. This shouldn't exist.
@@ -733,16 +736,6 @@ extension BackupArchive {
                 /// directionality as their parent.)
                 case revisionOfOutgoingMessageMissingOutgoingDetails
 
-                /// A ``BackupProto_FilePointer/AttachmentLocator`` was missing its cdn key.
-                case filePointerMissingTransitCdnKey
-                /// A ``BackupProto_FilePointer/BackupLocator`` was missing its media name.
-                case filePointerMissingMediaName
-                /// A ``BackupProto_FilePointer/AttachmentLocator`` or a
-                /// ``BackupProto_FilePointer/BackupLocator`` was missing the encryption key.
-                case filePointerMissingEncryptionKey
-                /// A ``BackupProto_FilePointer/AttachmentLocator`` or a
-                /// ``BackupProto_FilePointer/BackupLocator`` was missing the digest.
-                case filePointerMissingDigest
                 /// A ``BackupProto_MessageAttachment/clientUuid`` contained an invalid UUID.
                 case invalidAttachmentClientUUID
 
@@ -775,6 +768,8 @@ extension BackupArchive {
 
             /// We failed to properly create the attachment in the DB after restoring
             case failedToCreateAttachment
+
+            case failedToSetBackupPlan(RawError)
 
             /// These should never happen; it means some invariant we could not
             /// enforce with the type system was broken. Nothing was wrong with
@@ -825,7 +820,8 @@ extension BackupArchive {
                         .invalidMediaRootBackupKey,
                         .accountDataNotFound,
                         .recipientIdNotFound,
-                        .chatIdNotFound:
+                        .chatIdNotFound,
+                        .invalidBackupTier:
                     // Collapse these by the id they refer to, which is in the "type".
                     return typeLogString
                 case .customChatColorNotFound(let id):
@@ -891,10 +887,6 @@ extension BackupArchive {
                         .learnedProfileUpdateNotFromContact,
                         .revisionOfIncomingMessageMissingIncomingDetails,
                         .revisionOfOutgoingMessageMissingOutgoingDetails,
-                        .filePointerMissingTransitCdnKey,
-                        .filePointerMissingMediaName,
-                        .filePointerMissingEncryptionKey,
-                        .filePointerMissingDigest,
                         .invalidAttachmentClientUUID,
                         .callLinkInvalidRootKey,
                         .callLinkUsedAsChatRecipient,
@@ -917,7 +909,7 @@ extension BackupArchive {
                 // We don't want to re-log every instance of this we see if they repeat.
                 // Collapse them by the raw error itself.
                 return "\(rawError)"
-            case .developerError:
+            case .failedToSetBackupPlan, .developerError:
                 // Log each of these as we see them.
                 return nil
             }
@@ -941,6 +933,7 @@ extension BackupArchive {
                         .invalidProfileKey,
                         .invalidContactIdentityKey,
                         .invalidDistributionListMember,
+                        .invalidBackupTier,
                         .contactWithoutIdentifiers,
                         .otherContactWithLocalIdentifiers,
                         .chatItemInvalidDateSent,
@@ -993,10 +986,6 @@ extension BackupArchive {
                         .learnedProfileUpdateNotFromContact,
                         .revisionOfIncomingMessageMissingIncomingDetails,
                         .revisionOfOutgoingMessageMissingOutgoingDetails,
-                        .filePointerMissingTransitCdnKey,
-                        .filePointerMissingMediaName,
-                        .filePointerMissingEncryptionKey,
-                        .filePointerMissingDigest,
                         .invalidAttachmentClientUUID,
                         .callLinkInvalidRootKey,
                         .callLinkUsedAsChatRecipient,
@@ -1022,6 +1011,7 @@ extension BackupArchive {
                     .referencedCustomChatColorNotFound,
                     .databaseModelMissingRowId,
                     .databaseInsertionFailed,
+                    .failedToSetBackupPlan,
                     .failedToEnqueueAttachmentDownload,
                     .developerError:
                 return .error

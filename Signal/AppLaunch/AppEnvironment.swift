@@ -31,7 +31,6 @@ public class AppEnvironment: NSObject {
 
     private(set) var appIconBadgeUpdater: AppIconBadgeUpdater!
     private(set) var avatarHistoryManager: AvatarHistoryManager!
-    private(set) var backupDisablingManager: BackupDisablingManager!
     private(set) var backupEnablingManager: BackupEnablingManager!
     private(set) var badgeManager: BadgeManager!
     private(set) var callLinkProfileKeySharingManager: CallLinkProfileKeySharingManager!
@@ -52,12 +51,6 @@ public class AppEnvironment: NSObject {
 
     func setUp(appReadiness: AppReadiness, callService: CallService) {
         let backupSettingsStore = BackupSettingsStore()
-        let backupDisablingManager = BackupDisablingManager(
-            backupIdManager: DependenciesBridge.shared.backupIdManager,
-            backupSettingsStore: BackupSettingsStore(),
-            db: DependenciesBridge.shared.db,
-            tsAccountManager: DependenciesBridge.shared.tsAccountManager,
-        )
         let badgeManager = BadgeManager(
             databaseStorage: SSKEnvironment.shared.databaseStorageRef,
             mainScheduler: DispatchQueue.main,
@@ -74,12 +67,12 @@ public class AppEnvironment: NSObject {
             db: DependenciesBridge.shared.db
         )
         self.badgeManager = badgeManager
-        self.backupDisablingManager = backupDisablingManager
         self.backupEnablingManager = BackupEnablingManager(
-            backupDisablingManager: backupDisablingManager,
+            backupDisablingManager: DependenciesBridge.shared.backupDisablingManager,
             backupIdManager: DependenciesBridge.shared.backupIdManager,
-            backupSettingsStore: BackupSettingsStore(),
+            backupPlanManager: DependenciesBridge.shared.backupPlanManager,
             backupSubscriptionManager: DependenciesBridge.shared.backupSubscriptionManager,
+            backupTestFlightEntitlementManager: DependenciesBridge.shared.backupTestFlightEntitlementManager,
             db: DependenciesBridge.shared.db,
             tsAccountManager: DependenciesBridge.shared.tsAccountManager,
         )
@@ -125,19 +118,19 @@ public class AppEnvironment: NSObject {
         }
 
         appReadiness.runNowOrWhenAppDidBecomeReadyAsync {
+            let backupDisablingManager = DependenciesBridge.shared.backupDisablingManager
             let backupSubscriptionManager = DependenciesBridge.shared.backupSubscriptionManager
+            let backupTestFlightEntitlementManager = DependenciesBridge.shared.backupTestFlightEntitlementManager
             let callRecordStore = DependenciesBridge.shared.callRecordStore
             let callRecordQuerier = DependenciesBridge.shared.callRecordQuerier
             let db = DependenciesBridge.shared.db
             let deletedCallRecordCleanupManager = DependenciesBridge.shared.deletedCallRecordCleanupManager
             let groupCallPeekClient = SSKEnvironment.shared.groupCallManagerRef.groupCallPeekClient
+            let identityKeyMismatchManager = DependenciesBridge.shared.identityKeyMismatchManager
             let inactiveLinkedDeviceFinder = DependenciesBridge.shared.inactiveLinkedDeviceFinder
             let interactionStore = DependenciesBridge.shared.interactionStore
-            let learnMyOwnPniManager = DependenciesBridge.shared.learnMyOwnPniManager
-            let linkedDevicePniKeyManager = DependenciesBridge.shared.linkedDevicePniKeyManager
             let masterKeySyncManager = DependenciesBridge.shared.masterKeySyncManager
             let notificationPresenter = SSKEnvironment.shared.notificationPresenterRef
-            let pniHelloWorldManager = DependenciesBridge.shared.pniHelloWorldManager
             let recipientDatabaseTable = DependenciesBridge.shared.recipientDatabaseTable
             let storageServiceManager = SSKEnvironment.shared.storageServiceManagerRef
             let threadStore = DependenciesBridge.shared.threadStore
@@ -167,15 +160,6 @@ public class AppEnvironment: NSObject {
             if isPrimaryDevice {
                 Task {
                     do {
-                        try await learnMyOwnPniManager.learnMyOwnPniIfNecessary()
-                        try await pniHelloWorldManager.sayHelloWorldIfNecessary()
-                    } catch {
-                        Logger.warn("Couldn't initialize PNI: \(error)")
-                    }
-                }
-
-                Task {
-                    do {
                         try await avatarDefaultColorStorageServiceMigrator.performMigrationIfNecessary()
                     } catch {
                         Logger.warn("Couldn't perform avatar default color migration: \(error)")
@@ -183,7 +167,7 @@ public class AppEnvironment: NSObject {
                 }
             } else {
                 Task {
-                    await linkedDevicePniKeyManager.validateLocalPniIdentityKeyIfNecessary()
+                    await identityKeyMismatchManager.validateLocalPniIdentityKeyIfNecessary()
                 }
             }
 
@@ -204,7 +188,7 @@ public class AppEnvironment: NSObject {
             }
 
             Task { () async -> Void in
-                try? await self.backupDisablingManager.disableRemotelyIfNecessary()
+                await backupDisablingManager.disableRemotelyIfNecessary()
             }
 
             Task {
@@ -219,7 +203,15 @@ public class AppEnvironment: NSObject {
                 do {
                     try await backupSubscriptionManager.redeemSubscriptionIfNecessary()
                 } catch {
-                    owsFailDebug("Failed to redeem subscription in launch job: \(error)")
+                    owsFailDebug("Failed to redeem Backup subscription in launch job: \(error)")
+                }
+            }
+
+            Task {
+                do {
+                    try await backupTestFlightEntitlementManager.renewEntitlementIfNecessary()
+                } catch {
+                    owsFailDebug("Failed to renew Backup entitlement for TestFlight in launch job: \(error)")
                 }
             }
 

@@ -466,7 +466,15 @@ public class RegistrationNavigationController: OWSNavigationController {
 
     @objc
     private func didRequestToSubmitDebugLogs() {
-        DebugLogs.submitLogs(supportTag: "Registration", dumper: .fromGlobals())
+        if DebugFlags.internalSettings {
+            let navVc = UINavigationController(rootViewController: InternalSettingsViewController(
+                mode: .registration,
+                appReadiness: appReadiness
+            ))
+            self.present(navVc, animated: true)
+        } else {
+            DebugLogs.submitLogs(supportTag: "Registration", dumper: .fromGlobals())
+        }
     }
 }
 
@@ -671,11 +679,14 @@ extension RegistrationNavigationController: RegistrationEnterAccountEntropyPoolP
     }
 
     func cancelKeyEntry() {
-        let guarantee = coordinator.resetRestoreMethodChoice()
+        let guarantee = coordinator.cancelBackupKeyEntry()
         pushNextController(guarantee)
     }
 
-    func forgotKeyAction() { }
+    func forgotKeyAction() {
+        let guarantee = coordinator.updateRestoreMethod(method: .declined)
+        pushNextController(guarantee)
+    }
 }
 
 extension RegistrationNavigationController: RegistrationChooseRestoreMethodPresenter {
@@ -685,7 +696,7 @@ extension RegistrationNavigationController: RegistrationChooseRestoreMethodPrese
     }
 
     func didCancelRestoreMethodSelection() {
-        let guarantee = coordinator.resetRestoreMethodChoice()
+        let guarantee = coordinator.resetRestoreMode()
         pushNextController(guarantee)
     }
 }
@@ -697,7 +708,7 @@ extension RegistrationNavigationController: RegistrationQuickRestoreQRCodePresen
     }
 
     func cancelChosenRestoreMethod() {
-        let guarantee = coordinator.resetRestoreMethodChoice()
+        let guarantee = coordinator.resetRestoreMode()
         pushNextController(guarantee)
     }
 }
@@ -710,6 +721,16 @@ extension RegistrationNavigationController: RegistrationTransferStatusPresenter 
 }
 
 extension RegistrationNavigationController: RegistrationRestoreFromBackupConfirmationPresenter {
+    func skipRestoreFromBackup() {
+        let guarantee = coordinator.updateRestoreMethod(method: .declined)
+        pushNextController(guarantee)
+    }
+
+    func cancelRestoreFromBackup() {
+        let guarantee = coordinator.resetRestoreMethodChoice()
+        pushNextController(guarantee)
+    }
+
     func restoreFromBackupConfirmed() {
         let guarantee = coordinator.confirmRestoreFromBackup()
         pushNextController(guarantee)

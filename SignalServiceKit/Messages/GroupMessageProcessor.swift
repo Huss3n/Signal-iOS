@@ -224,7 +224,7 @@ internal class SpecificGroupMessageProcessor {
 
         return GroupMessageProcessorManager.discardMode(
             forMessageFrom: sourceAci,
-            groupId: groupContextInfo.groupId.serialize(),
+            groupId: groupContextInfo.groupId,
             tx: tx
         )
     }
@@ -240,7 +240,7 @@ internal class SpecificGroupMessageProcessor {
         }
         return GroupMessageProcessorManager.discardMode(
             forMessageFrom: sourceAci,
-            groupId: jobInfo.groupContextInfo.groupId.serialize(),
+            groupId: jobInfo.groupContextInfo.groupId,
             shouldCheckGroupModel: hasGroupBeenUpdated,
             tx: tx
         )
@@ -412,12 +412,12 @@ internal class SpecificGroupMessageProcessor {
     private func updateUsingEmbeddedGroupUpdate(
         jobInfo: IncomingGroupsV2MessageJobInfo
     ) async throws(RetryableError) -> Bool {
-        let groupId = jobInfo.groupContextInfo.groupId.serialize()
+        let groupId = jobInfo.groupContextInfo.groupId
         let secretParams = jobInfo.groupContextInfo.groupSecretParams
 
         // TODO: Move this to the other method to avoid duplicate fetches.
         let groupThread = SSKEnvironment.shared.databaseStorageRef.read { tx in
-            return TSGroupThread.fetch(groupId: groupId, transaction: tx)
+            return TSGroupThread.fetch(forGroupId: groupId, tx: tx)
         }
         guard
             let groupThread,
@@ -445,7 +445,7 @@ internal class SpecificGroupMessageProcessor {
 
             // We need to verify the signatures because these protos came from another
             // client, not the service.
-            changeActionsProto = try GroupsV2Protos.parseGroupChangeProto(changeProto, verificationOperation: .verifySignature(groupId: groupId))
+            changeActionsProto = try GroupsV2Protos.parseGroupChangeProto(changeProto, verificationOperation: .verifySignature(groupId: groupId.serialize()))
         } catch {
             Logger.warn("Couldn't verify change actions: \(error)")
             return false
@@ -462,7 +462,6 @@ internal class SpecificGroupMessageProcessor {
                 return .reportable(serverGuid: serverGuid)
             }()
             try await SSKEnvironment.shared.groupsV2Ref.updateGroupWithChangeActions(
-                groupId: groupId,
                 spamReportingMetadata: spamReportingMetadata,
                 changeActionsProto: changeActionsProto,
                 groupSecretParams: secretParams
@@ -793,7 +792,7 @@ public class GroupMessageProcessorManager {
     /// group is blocked.
     public static func discardMode(
         forMessageFrom sourceAci: Aci,
-        groupId: Data,
+        groupId: GroupIdentifier,
         shouldCheckGroupModel: Bool = true,
         tx: DBReadTransaction
     ) -> DiscardMode {
@@ -817,7 +816,7 @@ public class GroupMessageProcessorManager {
                 owsFailDebug("Missing localAddress.")
                 return .discard
             }
-            guard let groupThread = TSGroupThread.fetch(groupId: groupId, transaction: tx) else {
+            guard let groupThread = TSGroupThread.fetch(forGroupId: groupId, tx: tx) else {
                 // The user might have just deleted the thread
                 // but this race should be extremely rare.
                 // Usually this should indicate a bug.

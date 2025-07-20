@@ -8,11 +8,25 @@ import GRDB
 extension Attachment {
     /// How long we keep attachment files locally by default when "optimize local storage"
     /// is enabled. Measured from the receive time of the most recent owning message.
-    public static let offloadingThresholdMs: UInt64 = .dayInMs * 30
+    public static var offloadingThresholdMs: UInt64 {
+        if offloadingThresholdOverride { return 0 }
+        return .dayInMs * 30
+    }
 
     /// How long we keep attachment files locally after viewing them when "optimize local storage"
     /// is enabled.
-    private static let offloadingViewThresholdMs: UInt64 = .dayInMs * 7
+    private static var offloadingViewThresholdMs: UInt64 {
+        if offloadingThresholdOverride { return 0 }
+        return .dayInMs * 7
+    }
+
+    public static var offloadingThresholdOverride: Bool {
+        get { DebugFlags.internalSettings && UserDefaults.standard.bool(forKey: "offloadingThresholdOverride") }
+        set {
+            guard DebugFlags.internalSettings else { return }
+            UserDefaults.standard.set(newValue, forKey: "offloadingThresholdOverride")
+        }
+    }
 
     /// Returns true if the given attachment should be offloaded (have its local file(s) deleted)
     /// because it has met the criteria to be stored exclusively in the backup media tier.
@@ -50,7 +64,7 @@ extension Attachment {
         // eligibility to offload.
         switch try mostRecentReference().owner {
         case .message(let messageSource):
-            return messageSource.receivedAtTimestamp + Self.offloadingThresholdMs > currentTimestamp
+            return messageSource.receivedAtTimestamp + Self.offloadingThresholdMs < currentTimestamp
         case .storyMessage:
             // Story messages expire on their own; never offload
             // any attachment owned by a story message.
@@ -79,8 +93,8 @@ public class AttachmentOffloadingManagerImpl: AttachmentOffloadingManager {
     private let attachmentStore: AttachmentStore
     private let attachmentThumbnailService: AttachmentThumbnailService
     private let backupAttachmentDownloadStore: BackupAttachmentDownloadStore
+    private let backupAttachmentUploadEraStore: BackupAttachmentUploadEraStore
     private let backupSettingsStore: BackupSettingsStore
-    private let backupSubscriptionManager: BackupSubscriptionManager
     private let dateProvider: DateProvider
     private let db: DB
     private let listMediaManager: BackupListMediaManager
@@ -91,8 +105,8 @@ public class AttachmentOffloadingManagerImpl: AttachmentOffloadingManager {
         attachmentStore: AttachmentStore,
         attachmentThumbnailService: AttachmentThumbnailService,
         backupAttachmentDownloadStore: BackupAttachmentDownloadStore,
+        backupAttachmentUploadEraStore: BackupAttachmentUploadEraStore,
         backupSettingsStore: BackupSettingsStore,
-        backupSubscriptionManager: BackupSubscriptionManager,
         dateProvider: @escaping DateProvider,
         db: DB,
         listMediaManager: BackupListMediaManager,
@@ -102,8 +116,8 @@ public class AttachmentOffloadingManagerImpl: AttachmentOffloadingManager {
         self.attachmentStore = attachmentStore
         self.attachmentThumbnailService = attachmentThumbnailService
         self.backupAttachmentDownloadStore = backupAttachmentDownloadStore
+        self.backupAttachmentUploadEraStore = backupAttachmentUploadEraStore
         self.backupSettingsStore = backupSettingsStore
-        self.backupSubscriptionManager = backupSubscriptionManager
         self.dateProvider = dateProvider
         self.db = db
         self.listMediaManager = listMediaManager
@@ -134,7 +148,7 @@ public class AttachmentOffloadingManagerImpl: AttachmentOffloadingManager {
             }
         }
 
-        await orphanedAttachmentCleaner.runUntilFinished()
+        try await orphanedAttachmentCleaner.runUntilFinished()
     }
 
     static let maxThumbnailedAttachmentsPerBatch = 5
@@ -153,7 +167,7 @@ public class AttachmentOffloadingManagerImpl: AttachmentOffloadingManager {
                 return ([], false)
             }
 
-            let currentUploadEra = backupSubscriptionManager.getUploadEra(tx: tx)
+            let currentUploadEra = backupAttachmentUploadEraStore.currentUploadEra(tx: tx)
 
             var attachmentQuery = Attachment.Record
                 // We only offload downloaded attachments, duh
@@ -162,7 +176,10 @@ public class AttachmentOffloadingManagerImpl: AttachmentOffloadingManager {
                 .filter(Column(Attachment.Record.CodingKeys.mediaTierUploadEra) == currentUploadEra)
                 .filter(Column(Attachment.Record.CodingKeys.mediaTierCdnNumber) != nil)
                 // Don't offload stuff viewed recently
-                .filter(Column(Attachment.Record.CodingKeys.lastFullscreenViewTimestamp) < viewedTimestampCutoff)
+                .filter(
+                    Column(Attachment.Record.CodingKeys.lastFullscreenViewTimestamp) == nil
+                    || Column(Attachment.Record.CodingKeys.lastFullscreenViewTimestamp) < viewedTimestampCutoff
+                )
 
             if let lastAttachmentId {
                 attachmentQuery = attachmentQuery
@@ -229,7 +246,7 @@ public class AttachmentOffloadingManagerImpl: AttachmentOffloadingManager {
                 return
             }
 
-            let currentUploadEra = backupSubscriptionManager.getUploadEra(tx: tx)
+            let currentUploadEra = backupAttachmentUploadEraStore.currentUploadEra(tx: tx)
 
             for nextAttachment in candidateAttachments {
                 // Refetch the attachment and reference.
@@ -318,14 +335,14 @@ public class AttachmentOffloadingManagerImpl: AttachmentOffloadingManager {
     }
 
     private func backupPlanAllowsOffloading(tx: DBReadTransaction) -> Bool {
-        switch db.read(block: { backupSettingsStore.backupPlan(tx: $0) }) {
-        case .disabled, .free:
+        switch backupSettingsStore.backupPlan(tx: tx) {
+        case .disabled, .disabling, .free:
             return false
         case .paidExpiringSoon(_):
             // Don't offload if our subscription expires soon, regardless of the
             // optimizeLocalStorage setting.
             return false
-        case .paid(let optimizeLocalStorage):
+        case .paid(let optimizeLocalStorage), .paidAsTester(let optimizeLocalStorage):
             return optimizeLocalStorage
         }
     }
@@ -426,9 +443,14 @@ public class AttachmentOffloadingManagerImpl: AttachmentOffloadingManager {
                     )
 
                     // Write the thumbnail to the reserved file location.
-                    try encryptedThumbnailData.write(
-                        to: AttachmentStream.absoluteAttachmentFileURL(relativeFilePath: reservedThumbnailFilePath)
-                    )
+                    let fileUrl = AttachmentStream.absoluteAttachmentFileURL(relativeFilePath: reservedThumbnailFilePath)
+                    guard OWSFileSystem.ensureDirectoryExists(fileUrl.deletingLastPathComponent().path) else {
+                        throw OWSAssertionError("Unable to create directory")
+                    }
+                    guard OWSFileSystem.ensureFileExists(fileUrl.path) else {
+                        throw OWSAssertionError("Unable to create file")
+                    }
+                    try encryptedThumbnailData.write(to: fileUrl)
                     return attachment.id
                 }
             }

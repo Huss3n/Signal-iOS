@@ -51,9 +51,9 @@ public struct BackupKeyMaterialImpl: BackupKeyMaterial {
         let keyBytes: Data
         do {
             switch type {
-            case .attachment:
+            case .outerLayerFullsizeOrThumbnail:
                 keyBytes = try backupKey.deriveMediaEncryptionKey(mediaId)
-            case .thumbnail:
+            case .transitTierThumbnail:
                 keyBytes = try backupKey.deriveThumbnailTransitEncryptionKey(mediaId)
             }
         } catch {
@@ -72,11 +72,18 @@ public struct BackupKeyMaterialImpl: BackupKeyMaterial {
 #if TESTABLE_BUILD
 
 open class BackupKeyMaterialMock: BackupKeyMaterial {
+
+    public var mediaBackupKey: BackupKey!
+    public var messagesBackupKey: BackupKey!
+
     public func backupKey(
         type: BackupAuthCredentialType,
         tx: DBReadTransaction
     ) throws(BackupKeyMaterialError) -> BackupKey {
-        fatalError("Unimplemented")
+        switch type {
+        case .media: return mediaBackupKey
+        case .messages: return messagesBackupKey
+        }
     }
 
     public func mediaEncryptionMetadata(

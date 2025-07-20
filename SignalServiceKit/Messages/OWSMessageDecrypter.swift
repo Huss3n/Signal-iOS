@@ -260,10 +260,10 @@ public class OWSMessageDecrypter {
         case .pni:
             Logger.info("Not resetting or requesting resend of message sent to PNI.")
 
-            let linkedDevicePniKeyManager = DependenciesBridge.shared.linkedDevicePniKeyManager
-            linkedDevicePniKeyManager.recordSuspectedIssueWithPniIdentityKey(tx: transaction)
+            let identityKeyMismatchManager = DependenciesBridge.shared.identityKeyMismatchManager
+            identityKeyMismatchManager.recordSuspectedIssueWithPniIdentityKey(tx: transaction)
             Task {
-                await linkedDevicePniKeyManager.validateLocalPniIdentityKeyIfNecessary()
+                await identityKeyMismatchManager.validateLocalPniIdentityKeyIfNecessary()
             }
 
             errorMessage = .failedDecryption(
@@ -424,7 +424,7 @@ public class OWSMessageDecrypter {
                     signedPreKeyStore: signalProtocolStore.signedPreKeyStore,
                     kyberPreKeyStore: signalProtocolStore.kyberPreKeyStore,
                     context: transaction,
-                    usePqRatchet: false
+                    usePqRatchet: RemoteConfig.current.usePqRatchet
                 )
             case .senderKey:
                 plaintext = try groupDecrypt(

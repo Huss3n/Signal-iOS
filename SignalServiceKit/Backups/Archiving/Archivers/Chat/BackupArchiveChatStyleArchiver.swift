@@ -18,7 +18,7 @@ public class BackupArchiveChatStyleArchiver: BackupArchiveProtoStreamWriter {
         attachmentStore: AttachmentStore,
         backupAttachmentDownloadManager: BackupAttachmentDownloadManager,
         chatColorSettingStore: ChatColorSettingStore,
-        wallpaperStore: WallpaperStore
+        wallpaperStore: WallpaperStore,
     ) {
         self.attachmentManager = attachmentManager
         self.attachmentStore = attachmentStore
@@ -455,7 +455,8 @@ public class BackupArchiveChatStyleArchiver: BackupArchiveProtoStreamWriter {
         }
 
         return .success(referencedAttachment.asBackupFilePointer(
-            currentBackupAttachmentUploadEra: context.currentBackupAttachmentUploadEra
+            currentBackupAttachmentUploadEra: context.currentBackupAttachmentUploadEra,
+            attachmentByteCounter: context.attachmentByteCounter,
         ))
     }
 

@@ -1147,6 +1147,36 @@ public class InteractionFinder: NSObject {
         }
     }
 
+    public class func outgoingAndIncomingMessageCount(transaction: DBReadTransaction, limit: Int) -> UInt {
+        let sql = """
+            SELECT COUNT(*)
+            FROM (
+             SELECT * FROM \(InteractionRecord.databaseTableName)
+            \(DEBUG_INDEXED_BY("index_interaction_on_recordType_and_callType"))
+            WHERE \(interactionColumn: .recordType) IN (?, ?)
+            LIMIT ?)
+            """
+        let arguments: StatementArguments = [
+            SDSRecordType.outgoingMessage.rawValue,
+            SDSRecordType.incomingMessage.rawValue,
+            limit
+        ]
+
+        do {
+            return try UInt.fetchOne(
+                transaction.database,
+                sql: sql,
+                arguments: arguments
+            ) ?? 0
+        } catch {
+            DatabaseCorruptionState.flagDatabaseReadCorruptionIfNecessary(
+                userDefaults: CurrentAppContext().appUserDefaults(),
+                error: error
+            )
+            owsFail("Failed to determine message count")
+        }
+    }
+
     // MARK: - Fetch by Row ID
 
     public enum RowIdFilter {
@@ -1557,6 +1587,22 @@ extension InteractionFinder {
             """
         case .excludeAllEdits:
             return "AND \(columnPrefix)\(interactionColumn: .editState) IS \(TSEditState.none.rawValue)"
+        }
+    }
+
+    public class func maxInteractionRowId(transaction: DBReadTransaction) -> UInt64 {
+        let sql = """
+            SELECT MAX(\(interactionColumn: .id))
+            FROM \(InteractionRecord.databaseTableName)
+            """
+        do {
+            return try UInt64.fetchOne(
+                transaction.database,
+                sql: sql
+            ) ?? 0
+        } catch {
+            owsFailDebug("Failed to find max transaction ID: \(error)")
+            return 0
         }
     }
 }

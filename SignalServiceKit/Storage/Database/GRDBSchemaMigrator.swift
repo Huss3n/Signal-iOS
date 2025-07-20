@@ -330,6 +330,9 @@ public class GRDBSchemaMigrator {
         case addByteCountAndIsFullsizeToBackupAttachmentUpload
         case refactorBackupAttachmentDownload
         case removeAttachmentMediaTierDigestColumn
+        case addListMediaTable
+        case recomputeAttachmentMediaNames
+        case lastDraftInteractionRowID
 
         // NOTE: Every time we add a migration id, consider
         // incrementing grdbSchemaVersionLatest.
@@ -393,7 +396,7 @@ public class GRDBSchemaMigrator {
     }
 
     public static let grdbSchemaVersionDefault: UInt = 0
-    public static let grdbSchemaVersionLatest: UInt = 115
+    public static let grdbSchemaVersionLatest: UInt = 118
 
     // An optimization for new users, we have the first migration import the latest schema
     // and mark any other migrations as "already run".
@@ -4091,6 +4094,49 @@ public class GRDBSchemaMigrator {
             }
             return .success(())
         }
+
+        migrator.registerMigration(.addListMediaTable) { tx in
+            try tx.database.create(table: "ListedBackupMediaObject") { table in
+                table.column("id", .integer).primaryKey(autoincrement: true)
+                table.column("mediaId", .blob).notNull()
+                table.column("cdnNumber", .integer).notNull()
+                table.column("objectLength", .integer).notNull()
+            }
+
+            try tx.database.create(
+                index: "index_ListedBackupMediaObject_on_mediaId",
+                on: "ListedBackupMediaObject",
+                columns: ["mediaId"]
+            )
+
+            return .success(())
+        }
+
+        migrator.registerMigration(.recomputeAttachmentMediaNames) { tx in
+            try tx.database.execute(sql: """
+                UPDATE Attachment
+                SET mediaName = CASE
+                    WHEN sha256ContentHash IS NOT NULL AND encryptionKey IS NOT NULL
+                        THEN lower(hex(sha256ContentHash || encryptionKey))
+                    ELSE NULL
+                END;
+                """
+            )
+
+            return .success(())
+        }
+
+        migrator.registerMigration(.lastDraftInteractionRowID) { tx in
+            try tx.database.alter(table: "model_TSThread") { table in
+                table.add(column: "lastDraftInteractionRowId", .integer).defaults(to: 0)
+            }
+
+            try tx.database.alter(table: "model_TSThread") { table in
+                table.add(column: "lastDraftUpdateTimestamp", .integer).defaults(to: 0)
+            }
+
+              return .success(())
+          }
 
         // MARK: - Schema Migration Insertion Point
     }

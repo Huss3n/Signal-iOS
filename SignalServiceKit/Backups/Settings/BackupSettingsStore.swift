@@ -3,31 +3,27 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-public enum BackupFrequency: Int, CaseIterable, Identifiable {
-    case daily = 1
-    case weekly = 2
-    case monthly = 3
-    case manually = 4
-
-    public var id: Int { rawValue }
-}
-
 public enum BackupPlan: RawRepresentable {
     case disabled
+    case disabling
     case free
     case paid(optimizeLocalStorage: Bool)
     case paidExpiringSoon(optimizeLocalStorage: Bool)
+    case paidAsTester(optimizeLocalStorage: Bool)
 
     // MARK: RawRepresentable
 
     public init?(rawValue: Int) {
         switch rawValue {
         case 6: self = .disabled
+        case 7: self = .disabling
         case 1: self = .free
         case 2: self = .paid(optimizeLocalStorage: false)
         case 3: self = .paid(optimizeLocalStorage: true)
         case 4: self = .paidExpiringSoon(optimizeLocalStorage: false)
         case 5: self = .paidExpiringSoon(optimizeLocalStorage: true)
+        case 8: self = .paidAsTester(optimizeLocalStorage: false)
+        case 9: self = .paidAsTester(optimizeLocalStorage: true)
         default: return nil
         }
     }
@@ -35,30 +31,36 @@ public enum BackupPlan: RawRepresentable {
     public var rawValue: Int {
         switch self {
         case .disabled: return 6
+        case .disabling: return 7
         case .free: return 1
         case .paid(let optimizeLocalStorage): return optimizeLocalStorage ? 3 : 2
         case .paidExpiringSoon(let optimizeLocalStorage): return optimizeLocalStorage ? 5 : 4
+        case .paidAsTester(let optimizeLocalStorage): return optimizeLocalStorage ? 9 : 8
         }
     }
 }
 
 // MARK: -
 
+extension NSNotification.Name {
+    public static let backupAttachmentDownloadQueueSuspensionStatusDidChange = Notification.Name("BackupSettingsStore.backupAttachmentDownloadQueueSuspensionStatusDidChange")
+    public static let shouldAllowBackupDownloadsOnCellularChanged = Notification.Name("BackupSettingsStore.shouldAllowBackupDownloadsOnCellularChanged")
+    public static let shouldAllowBackupUploadsOnCellularChanged = Notification.Name("BackupSettingsStore.shouldAllowBackupUploadsOnCellularChanged")
+}
+
+// MARK: -
+
 public struct BackupSettingsStore {
 
-    public enum Notifications {
-        public static let backupPlanChanged = Notification.Name("BackupSettingsStore.backupPlanChanged")
-        public static let shouldBackUpOnCellularChanged = Notification.Name("BackupSettingsStore.shouldBackUpOnCellularChanged")
-    }
-
     private enum Keys {
-        static let haveEverBeenEnabled = "haveEverBeenEnabledKey"
-        static let plan = "planKey"
+        static let haveEverBeenEnabled = "haveEverBeenEnabledKey2"
+        static let plan = "planKey2"
         static let firstBackupDate = "firstBackupDate"
         static let lastBackupDate = "lastBackupDate"
         static let lastBackupSizeBytes = "lastBackupSizeBytes"
-        static let backupFrequency = "backupFrequency"
-        static let shouldBackUpOnCellular = "shouldBackUpOnCellular"
+        static let isBackupAttachmentDownloadQueueSuspended = "isBackupAttachmentDownloadQueueSuspended"
+        static let shouldAllowBackupDownloadsOnCellular = "shouldAllowBackupDownloadsOnCellular"
+        static let shouldAllowBackupUploadsOnCellular = "shouldAllowBackupUploadsOnCellular"
         static let shouldOptimizeLocalStorage = "shouldOptimizeLocalStorage"
         static let lastBackupKeyReminderDate = "lastBackupKeyReminderDate"
     }
@@ -93,20 +95,18 @@ public struct BackupSettingsStore {
         return .disabled
     }
 
+    /// Set the current `BackupPlan`, without side-effects.
+    ///
+    /// - Important
+    /// Callers should prefer the API on `BackupPlanManager`, or have considered
+    /// the consequences of avoiding the side-effects of setting `BackupPlan`.
     public func setBackupPlan(_ newBackupPlan: BackupPlan, tx: DBWriteTransaction) {
-        let currentBackupPlan = backupPlan(tx: tx)
-
         kvStore.setBool(true, key: Keys.haveEverBeenEnabled, transaction: tx)
         kvStore.setInt(newBackupPlan.rawValue, key: Keys.plan, transaction: tx)
-
-        if currentBackupPlan != newBackupPlan {
-            tx.addSyncCompletion {
-                NotificationCenter.default.post(name: Notifications.backupPlanChanged, object: nil)
-            }
-        }
     }
 
     // MARK: -
+
     public func firstBackupDate(tx: DBReadTransaction) -> Date? {
         return kvStore.getDate(Keys.firstBackupDate, transaction: tx)
     }
@@ -142,32 +142,63 @@ public struct BackupSettingsStore {
 
     // MARK: -
 
-    public func backupFrequency(tx: DBReadTransaction) -> BackupFrequency {
-        if
-            let persisted = kvStore.getInt(Keys.backupFrequency, transaction: tx)
-                .flatMap({ BackupFrequency(rawValue: $0) })
-        {
-            return persisted
-        }
-
-        return .daily
+    public func isBackupAttachmentDownloadQueueSuspended(tx: DBReadTransaction) -> Bool {
+        return kvStore.getBool(Keys.isBackupAttachmentDownloadQueueSuspended, defaultValue: false, transaction: tx)
     }
 
-    public func setBackupFrequency(_ backupFrequency: BackupFrequency, tx: DBWriteTransaction) {
-        kvStore.setInt(backupFrequency.rawValue, key: Keys.backupFrequency, transaction: tx)
+    /// We "suspend" the download queue to prevent downloads from automatically
+    /// beginning (and consuming device storage) without user opt-in, such as
+    /// when `BackupPlan` changes in the background. We un-suspend when the user
+    /// takes explicit action such that we know downloads should happen.
+    public func setIsBackupDownloadQueueSuspended(_ isSuspended: Bool, tx: DBWriteTransaction) {
+        kvStore.setBool(isSuspended, key: Keys.isBackupAttachmentDownloadQueueSuspended, transaction: tx)
+
+        // The "allow cellular downloads" setting isn't exposed as a toggle, and
+        // instead lasts for the duration of the "current download" once set.
+        //
+        // If the user has taken action on the download queue, treat that as the
+        // "current download" rotating, and consequently forget any past
+        // cellular-download state.
+        _setShouldAllowBackupDownloadsOnCellular(nil, tx: tx)
+
+        tx.addSyncCompletion {
+            NotificationCenter.default.post(name: .backupAttachmentDownloadQueueSuspensionStatusDidChange, object: nil)
+        }
     }
 
     // MARK: -
 
-    public func shouldBackUpOnCellular(tx: DBReadTransaction) -> Bool {
-        return kvStore.getBool(Keys.shouldBackUpOnCellular, defaultValue: false, transaction: tx)
+    public func shouldAllowBackupDownloadsOnCellular(tx: DBReadTransaction) -> Bool {
+        return kvStore.getBool(Keys.shouldAllowBackupDownloadsOnCellular, defaultValue: false, transaction: tx)
     }
 
-    public func setShouldBackUpOnCellular(_ shouldBackUpOnCellular: Bool, tx: DBWriteTransaction) {
-        kvStore.setBool(shouldBackUpOnCellular, key: Keys.shouldBackUpOnCellular, transaction: tx)
+    public func setShouldAllowBackupDownloadsOnCellular(tx: DBWriteTransaction) {
+        _setShouldAllowBackupDownloadsOnCellular(true, tx: tx)
+    }
+
+    private func _setShouldAllowBackupDownloadsOnCellular(_ shouldAllowBackupDownloadsOnCellular: Bool?, tx: DBWriteTransaction) {
+        if let shouldAllowBackupDownloadsOnCellular {
+            kvStore.setBool(shouldAllowBackupDownloadsOnCellular, key: Keys.shouldAllowBackupDownloadsOnCellular, transaction: tx)
+        } else {
+            kvStore.removeValue(forKey: Keys.shouldAllowBackupDownloadsOnCellular, transaction: tx)
+        }
 
         tx.addSyncCompletion {
-            NotificationCenter.default.post(name: Notifications.shouldBackUpOnCellularChanged, object: nil)
+            NotificationCenter.default.post(name: .shouldAllowBackupDownloadsOnCellularChanged, object: nil)
+        }
+    }
+
+    // MARK: -
+
+    public func shouldAllowBackupUploadsOnCellular(tx: DBReadTransaction) -> Bool {
+        return kvStore.getBool(Keys.shouldAllowBackupUploadsOnCellular, defaultValue: false, transaction: tx)
+    }
+
+    public func setShouldAllowBackupUploadsOnCellular(_ shouldAllowBackupUploadsOnCellular: Bool, tx: DBWriteTransaction) {
+        kvStore.setBool(shouldAllowBackupUploadsOnCellular, key: Keys.shouldAllowBackupUploadsOnCellular, transaction: tx)
+
+        tx.addSyncCompletion {
+            NotificationCenter.default.post(name: .shouldAllowBackupUploadsOnCellularChanged, object: nil)
         }
     }
 

@@ -250,6 +250,7 @@ public class OWSTableItem {
 
     public static func `switch`(
         withText text: String,
+        subtitle: String? = nil,
         accessibilityIdentifier: String? = nil,
         isOn: @escaping (() -> Bool),
         isEnabled: @escaping (() -> Bool) = { true },
@@ -258,6 +259,7 @@ public class OWSTableItem {
         return OWSTableItem(customCellBlock: {
             let cell = OWSTableItem.buildCell(
                 itemName: text,
+                subtitle: subtitle,
                 accessibilityIdentifier: accessibilityIdentifier
             )
 
@@ -506,6 +508,7 @@ public extension OWSTableItem {
         } else {
             let subtitleLabel = UILabel()
             subtitleLabel.text = subtitle
+            subtitleLabel.numberOfLines = 0
             subtitleLabel.textColor = accessoryGray()
             subtitleLabel.font = .dynamicTypeFootnoteClamped
 
@@ -599,6 +602,7 @@ public extension OWSTableItem {
     /// The value to copy, if different than ``value``.
     static func copyableItem(
         label: String,
+        subtitle: String? = nil,
         value displayValue: String?,
         pasteboardValue: String? = nil,
         accessibilityIdentifier: String? = nil
@@ -608,6 +612,7 @@ public extension OWSTableItem {
 
         return .item(
             name: label,
+            subtitle: subtitle,
             accessoryText: displayValue,
             accessibilityIdentifier: accessibilityIdentifier,
             actionBlock: {

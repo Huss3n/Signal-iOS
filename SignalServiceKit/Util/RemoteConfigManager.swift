@@ -257,6 +257,26 @@ public class RemoteConfig {
         return !isEnabled(.notificationServiceWebSocketKillSwitch)
     }
 
+    public var usePqRatchet: Bool {
+        return isEnabled(.usePqRatchet)
+    }
+
+    public var shouldVerifyPniAndPniIdentityKeyExist: Bool {
+        return isEnabled(.shouldVerifyPniAndPniIdentityKeyExist)
+    }
+
+    public var shouldValidateLinkedAciIdentityKey: Bool {
+        return isEnabled(.shouldValidateLinkedAciIdentityKey)
+    }
+
+    public var shouldValidatePrimaryAciIdentityKey: Bool {
+        return isEnabled(.shouldValidatePrimaryAciIdentityKey)
+    }
+
+    public var shouldValidatePrimaryPniIdentityKey: Bool {
+        return isEnabled(.shouldValidatePrimaryPniIdentityKey)
+    }
+
     // MARK: UInt values
 
     private func getUIntValue(
@@ -450,8 +470,13 @@ private enum IsEnabledFlag: String, FlagType {
     case paypalOneTimeDonationKillSwitch = "ios.paypalOneTimeDonationKillSwitch"
     case ringrtcNwPathMonitorTrialKillSwitch = "ios.ringrtcNwPathMonitorTrialKillSwitch"
     case serviceExtensionFailureKillSwitch = "ios.serviceExtensionFailureKillSwitch"
+    case shouldValidateLinkedAciIdentityKey = "ios.shouldValidateLinkedAciIdentityKey"
+    case shouldValidatePrimaryAciIdentityKey = "ios.shouldValidatePrimaryAciIdentityKey"
+    case shouldValidatePrimaryPniIdentityKey = "ios.shouldValidatePrimaryPniIdentityKey"
+    case shouldVerifyPniAndPniIdentityKeyExist = "ios.shouldVerifyPniAndPniIdentityKeyExist"
     case tsAttachmentMigrationBGProcessingTaskKillSwitch = "ios.tsAttachmentMigrationBGProcessingTaskKillSwitch"
     case tsAttachmentMigrationMainAppBackgroundKillSwitch = "ios.tsAttachmentMigrationMainAppBackgroundKillSwitch"
+    case usePqRatchet = "ios.usePqRatchet"
 
     var isHotSwappable: Bool {
         switch self {
@@ -474,8 +499,13 @@ private enum IsEnabledFlag: String, FlagType {
         case .paypalOneTimeDonationKillSwitch: false
         case .ringrtcNwPathMonitorTrialKillSwitch: false
         case .serviceExtensionFailureKillSwitch: true
+        case .shouldValidateLinkedAciIdentityKey: true
+        case .shouldValidatePrimaryAciIdentityKey: true
+        case .shouldValidatePrimaryPniIdentityKey: true
+        case .shouldVerifyPniAndPniIdentityKeyExist: true
         case .tsAttachmentMigrationBGProcessingTaskKillSwitch: true
         case .tsAttachmentMigrationMainAppBackgroundKillSwitch: true
+        case .usePqRatchet: true
         }
     }
 }
@@ -577,7 +607,7 @@ public class MockRemoteConfigProvider: RemoteConfigProvider {
 // MARK: -
 
 public protocol RemoteConfigManager: RemoteConfigProvider {
-    func warmCaches()
+    func warmCaches() -> RemoteConfig
     var cachedConfig: RemoteConfig? { get }
     /// Refresh the remote config from the server if it's been too long since we
     /// last fetched it.
@@ -591,7 +621,9 @@ public protocol RemoteConfigManager: RemoteConfigProvider {
 public class StubbableRemoteConfigManager: RemoteConfigManager {
     public var cachedConfig: RemoteConfig?
 
-    public func warmCaches() {}
+    public func warmCaches() -> RemoteConfig {
+        return currentConfig()
+    }
 
     public func refreshIfNeeded() async throws {
     }
@@ -654,14 +686,14 @@ public class RemoteConfigManagerImpl: RemoteConfigManager {
 
         appReadiness.runNowOrWhenMainAppDidBecomeReadyAsync {
             self.refreshRepeatedlyIfNeeded(forceInitialRefreshImmediately: false)
-        }
 
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(registrationStateDidChange),
-            name: .registrationStateDidChange,
-            object: nil
-        )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(self.registrationStateDidChange),
+                name: .registrationStateDidChange,
+                object: nil
+            )
+        }
     }
 
     // MARK: -
@@ -675,7 +707,7 @@ public class RemoteConfigManagerImpl: RemoteConfigManager {
         self.refreshRepeatedlyIfNeeded(forceInitialRefreshImmediately: true)
     }
 
-    public func warmCaches() {
+    public func warmCaches() -> RemoteConfig {
         owsAssertDebug(GRDBSchemaMigrator.areMigrationsComplete)
 
         // swiftlint:disable large_tuple
@@ -707,7 +739,7 @@ public class RemoteConfigManagerImpl: RemoteConfigManager {
             // If we're not registered or haven't saved one, use an empty one.
             remoteConfig = .emptyConfig
         }
-        updateCachedConfig { oldConfig in
+        return updateCachedConfig { oldConfig in
             if let oldConfig {
                 // If we're calling warmCaches for the second or later time, we can only
                 // update the flags that are hot-swappable.
@@ -803,22 +835,24 @@ public class RemoteConfigManagerImpl: RemoteConfigManager {
         var isEnabledFlags = [String: Bool]()
         var valueFlags = [String: String]()
         var timeGatedFlags = [String: Date]()
-        fetchedConfig.items.forEach { (key: String, item: FetchedRemoteConfigItem) in
-            switch item {
-            case .isEnabled(let isEnabled):
-                if IsEnabledFlag(rawValue: key) != nil {
-                    isEnabledFlags[key] = isEnabled
-                }
-            case .value(let value):
-                if ValueFlag(rawValue: key) != nil {
-                    valueFlags[key] = value
-                } else if TimeGatedFlag(rawValue: key) != nil {
+        fetchedConfig.items.forEach { config in
+            if IsEnabledFlag(rawValue: config.name) != nil {
+                isEnabledFlags[config.name] = (config.value == "1" || config.value == "true" || config.value == "TRUE" || config.enabled == true)
+                return
+            }
+            if ValueFlag(rawValue: config.name) != nil {
+                valueFlags[config.name] = config.value
+                return
+            }
+            if TimeGatedFlag(rawValue: config.name) != nil {
+                if let value = config.value {
                     if let secondsSinceEpoch = TimeInterval(value) {
-                        timeGatedFlags[key] = Date(timeIntervalSince1970: secondsSinceEpoch)
+                        timeGatedFlags[config.name] = Date(timeIntervalSince1970: secondsSinceEpoch)
                     } else {
                         owsFailDebug("Invalid value: \(value) \(type(of: value))")
                     }
                 }
+                return
             }
         }
 
@@ -867,13 +901,18 @@ public class RemoteConfigManagerImpl: RemoteConfigManager {
 
     // MARK: -
 
-    private enum FetchedRemoteConfigItem {
-        case isEnabled(Bool)
-        case value(String)
+    private struct UserRemoteConfigList: Decodable {
+        var config: [UserRemoteConfig]
+    }
+
+    private struct UserRemoteConfig: Decodable {
+        var name: String
+        var enabled: Bool?
+        var value: String?
     }
 
     private struct FetchedRemoteConfigResponse {
-        let items: [String: FetchedRemoteConfigItem]
+        let items: [UserRemoteConfig]
         let serverEpochTimeMs: UInt64?
     }
 
@@ -882,37 +921,13 @@ public class RemoteConfigManagerImpl: RemoteConfigManager {
 
         let response = try await networkManager.asyncRequest(request)
 
-        guard let json = response.responseBodyJson else {
-            throw OWSAssertionError("Missing or invalid JSON.")
-        }
-        guard let parser = ParamParser(responseObject: json) else {
-            throw OWSAssertionError("Missing or invalid response.")
-        }
+        let result = try JSONDecoder().decode(UserRemoteConfigList.self, from: response.responseBodyData ?? Data())
 
-        let config: [[String: Any]] = try parser.required(key: "config")
         let serverEpochTimeMs = response.headers["x-signal-timestamp"].flatMap(UInt64.init(_:))
         owsAssertDebug(serverEpochTimeMs != nil, "Must have X-Signal-Timestamp.")
 
-        let items: [String: FetchedRemoteConfigItem] = try config.reduce([:]) { accum, item in
-            var accum = accum
-            guard let itemParser = ParamParser(responseObject: item) else {
-                throw OWSAssertionError("Missing or invalid remote config item.")
-            }
-
-            let name: String = try itemParser.required(key: "name")
-            let isEnabled: Bool = try itemParser.required(key: "enabled")
-
-            if let value: String = try itemParser.optional(key: "value") {
-                accum[name] = .value(value)
-            } else {
-                accum[name] = .isEnabled(isEnabled)
-            }
-
-            return accum
-        }
-
         return FetchedRemoteConfigResponse(
-            items: items,
+            items: result.config,
             serverEpochTimeMs: serverEpochTimeMs
         )
     }

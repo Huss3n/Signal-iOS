@@ -8,7 +8,6 @@ public import SignalServiceKit
 
 public struct RegistrationCoordinatorDependencies {
     public let appExpiry: AppExpiry
-    public let backupArchiveErrorPresenter: BackupArchiveErrorPresenter
     public let backupArchiveManager: BackupArchiveManager
     public let backupKeyMaterial: BackupKeyMaterial
     public let changeNumberPniManager: ChangePhoneNumberPniManager
@@ -26,12 +25,12 @@ public struct RegistrationCoordinatorDependencies {
     public let messageProcessor: RegistrationCoordinatorImpl.Shims.MessageProcessor
     public let ows2FAManager: RegistrationCoordinatorImpl.Shims.OWS2FAManager
     public let phoneNumberDiscoverabilityManager: PhoneNumberDiscoverabilityManager
-    public let pniHelloWorldManager: PniHelloWorldManager
     public let preKeyManager: RegistrationCoordinatorImpl.Shims.PreKeyManager
     public let profileManager: RegistrationCoordinatorImpl.Shims.ProfileManager
     public let pushRegistrationManager: RegistrationCoordinatorImpl.Shims.PushRegistrationManager
     let quickRestoreManager: RegistrationCoordinatorImpl.Shims.QuickRestoreManager
     public let receiptManager: RegistrationCoordinatorImpl.Shims.ReceiptManager
+    public let registrationBackupErrorPresenter: RegistrationCoordinatorBackupErrorPresenter
     public let registrationStateChangeManager: RegistrationStateChangeManager
     public let schedulers: Schedulers
     public let sessionManager: RegistrationSessionManager
@@ -40,6 +39,7 @@ public struct RegistrationCoordinatorDependencies {
     public let storageServiceManager: RegistrationCoordinatorImpl.Shims.StorageServiceManager
     public let svr: SecureValueRecovery
     public let svrAuthCredentialStore: SVRAuthCredentialStorage
+    public let timeoutProvider: RegistrationCoordinatorImpl.Shims.TimeoutProvider
     public let tsAccountManager: TSAccountManager
     public let udManager: RegistrationCoordinatorImpl.Shims.UDManager
     public let usernameApiClient: any RegistrationCoordinatorImpl.Shims.UsernameApiClient
@@ -48,7 +48,6 @@ public struct RegistrationCoordinatorDependencies {
     public static func from(_ object: NSObject) -> RegistrationCoordinatorDependencies {
         return RegistrationCoordinatorDependencies(
             appExpiry: DependenciesBridge.shared.appExpiry,
-            backupArchiveErrorPresenter: DependenciesBridge.shared.backupArchiveErrorPresenter,
             backupArchiveManager: DependenciesBridge.shared.backupArchiveManager,
             backupKeyMaterial: DependenciesBridge.shared.backupKeyMaterial,
             changeNumberPniManager: DependenciesBridge.shared.changePhoneNumberPniManager,
@@ -66,7 +65,6 @@ public struct RegistrationCoordinatorDependencies {
             messageProcessor: RegistrationCoordinatorImpl.Wrappers.MessageProcessor(SSKEnvironment.shared.messageProcessorRef),
             ows2FAManager: RegistrationCoordinatorImpl.Wrappers.OWS2FAManager(SSKEnvironment.shared.ows2FAManagerRef),
             phoneNumberDiscoverabilityManager: DependenciesBridge.shared.phoneNumberDiscoverabilityManager,
-            pniHelloWorldManager: DependenciesBridge.shared.pniHelloWorldManager,
             preKeyManager: RegistrationCoordinatorImpl.Wrappers.PreKeyManager(
                 DependenciesBridge.shared.preKeyManager
             ),
@@ -74,6 +72,7 @@ public struct RegistrationCoordinatorDependencies {
             pushRegistrationManager: RegistrationCoordinatorImpl.Wrappers.PushRegistrationManager(AppEnvironment.shared.pushRegistrationManagerRef),
             quickRestoreManager: RegistrationCoordinatorImpl.Wrappers.QuickRestoreManager(AppEnvironment.shared.quickRestoreManager),
             receiptManager: RegistrationCoordinatorImpl.Wrappers.ReceiptManager(SSKEnvironment.shared.receiptManagerRef),
+            registrationBackupErrorPresenter: RegistrationCoordinatorBackupErrorPresenterImpl(),
             registrationStateChangeManager: DependenciesBridge.shared.registrationStateChangeManager,
             schedulers: DependenciesBridge.shared.schedulers,
             sessionManager: DependenciesBridge.shared.registrationSessionManager,
@@ -82,6 +81,7 @@ public struct RegistrationCoordinatorDependencies {
             storageServiceManager: RegistrationCoordinatorImpl.Wrappers.StorageServiceManager(SSKEnvironment.shared.storageServiceManagerRef),
             svr: DependenciesBridge.shared.svr,
             svrAuthCredentialStore: DependenciesBridge.shared.svrCredentialStorage,
+            timeoutProvider: RegistrationCoordinatorImpl.Wrappers.TimeoutProvider(),
             tsAccountManager: DependenciesBridge.shared.tsAccountManager,
             udManager: RegistrationCoordinatorImpl.Wrappers.UDManager(SSKEnvironment.shared.udManagerRef),
             usernameApiClient: RegistrationCoordinatorImpl.Wrappers.UsernameApiClient(DependenciesBridge.shared.usernameApiClient),

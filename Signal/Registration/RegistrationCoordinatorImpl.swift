@@ -102,18 +102,6 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
         return nextStep()
     }
 
-    func returnToSplash() -> Guarantee<RegistrationStep> {
-        Logger.info("")
-
-        db.write { tx in
-            self.updatePersistedState(tx) {
-                $0.hasShownSplash = false
-                $0.restoreMode = nil
-            }
-        }
-        return nextStep()
-    }
-
     public func requestPermissions() -> Guarantee<RegistrationStep> {
         Logger.info("")
 
@@ -327,8 +315,19 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
         inMemoryState.shouldRestoreSVRMasterKeyAfterRegistration = false
         inMemoryState.askForPinDuringReregistration = false
 
-        deps.db.write { tx in
-            updateMasterKeyAndLocalState(masterKey: accountEntropyPool.getMasterKey(), tx: tx)
+        // If the master key has already been restored from SVR, this can mean two things
+        // 1) The user has gone through the basic restore flow that may ask for the PIN before prompting
+        //    the restore method.
+        // 2) The user previously entered an AEP, but attempting to use the AEP derived master key resulted
+        //    in a RRP failure from the server, which usually means a prior registration rotated the
+        //    AEP and/or the MasterKey. In this case, we'll restore the MasterKey from SVR and won't overwrite
+        //    the value with any further AEP derived keys. This should be fine in regular use since SVR
+        //    should always contain the most recent MasterKey, and, in the case of reglock, the most recent
+        //    reglock token.
+        if !persistedState.hasRestoredFromSVR {
+            deps.db.write { tx in
+                updateMasterKeyAndLocalState(masterKey: accountEntropyPool.getMasterKey(), tx: tx)
+            }
         }
         return self.nextStep()
     }
@@ -550,6 +549,21 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
         return self.nextStep()
     }
 
+    public func resetRestoreMode() -> Guarantee<RegistrationStep> {
+        db.write { tx in
+            self.updatePersistedState(tx) {
+                $0.hasShownSplash = false
+                $0.restoreMode = nil
+            }
+        }
+        return resetRestoreMethodChoice()
+    }
+
+    public func cancelBackupKeyEntry() -> Guarantee<RegistrationStep> {
+        inMemoryState.accountEntropyPool = nil
+        return resetRestoreMethodChoice()
+    }
+
     public func resetRestoreMethodChoice() -> Guarantee<RegistrationStep> {
         inMemoryState.restoreMethod = nil
         inMemoryState.needsToAskForDeviceTransfer = true
@@ -559,7 +573,7 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
                 $0.hasDeclinedTransfer = false
             }
         }
-        return returnToSplash()
+        return self.nextStep()
     }
 
     public func confirmRestoreFromBackup() -> Guarantee<RegistrationStep> {
@@ -595,14 +609,31 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
                 backupPurpose: .remoteBackup,
                 progress: nil
             )
+        }.then {
             self.inMemoryState.hasRestoredFromLocalMessageBackup = true
             Logger.info("Finished restore")
+            return Guarantee.value(())
         }.recover(on: schedulers.main) { error in
-            let (guarantee, future) = Guarantee<Void>.pending()
-            self.deps.backupArchiveErrorPresenter.presentOverTopmostViewController {
-                future.resolve()
+            let errorType = self.deps.registrationBackupErrorPresenter.mapToRegistrationError(error: error)
+            return Guarantee.wrapAsync {
+                await self.deps.registrationBackupErrorPresenter.presentError(
+                    error: errorType,
+                    isQuickRestore: self.persistedState.restoreMode == .quickRestore
+                )
             }
-            return guarantee
+            .then { result -> Guarantee<Void> in
+                switch result {
+                case .restartQuickRestore, .none:
+                    owsFailDebug("Invalid option returned from handlinge of registration error.")
+                    fallthrough
+                case .incorrectBackupKey, .skipRestore:
+                    // By this point, it's really too late to do anything but skip the backup and continue
+                    return Guarantee.value(())
+                case .tryAgain:
+                    // retry the backup restore
+                    return self.restoreFromMessageBackup(type: type, identity: identity)
+                }
+            }
         }
     }
 
@@ -1166,8 +1197,9 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
             break
         }
 
-        let sessionGuarantee: Guarantee<Void> = deps.sessionManager.restoreSession()
-            .map(on: schedulers.main) { [weak self] session in
+        let sessionGuarantee: Guarantee<Void> = Guarantee.wrapAsync {
+                await self.deps.sessionManager.restoreSession()
+            } .map(on: schedulers.main) { [weak self] session in
                 self?.db.write { self?.processSession(session, $0) }
             }
 
@@ -1246,11 +1278,6 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
         }
 
         func finalizeRegistration(tx: DBWriteTransaction) {
-            /// Disable PNI Hello World operations – these aren't necessary
-            /// since we are the only device and know that our
-            /// just-generated our PNI identity key is correct.
-            deps.pniHelloWorldManager.markHelloWorldAsUnnecessary(tx: tx)
-
             persistLocalIdentifiers(tx: tx)
         }
 
@@ -1340,16 +1367,39 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
                 localIdentifiers: accountIdentity.localIdentifiers,
                 auth: accountIdentity.chatServiceAuth
             )
-        }.recover { error in
-            Logger.error("Can't fetch backup info: \(error.localizedDescription)")
-            return .value(nil)
-        }.map { cdnInfo -> RegistrationStep in
-            return .confirmRestoreFromBackup(
+        }
+        .then { cdnInfo -> Guarantee<RegistrationStep> in
+            return Guarantee.value(.confirmRestoreFromBackup(
                 RegistrationRestoreFromBackupConfirmationState(
+                    mode: .manual,
                     tier: .free,
                     lastBackupDate: cdnInfo?.lastModified,
                     lastBackupSizeBytes: cdnInfo?.contentLength
-                ))
+                )))
+        }
+        .recover { error -> Guarantee<RegistrationStep> in
+            let errorType = self.deps.registrationBackupErrorPresenter.mapToRegistrationError(error: error)
+            Logger.error("Can't fetch backup info: \(error.localizedDescription)")
+            return Guarantee.wrapAsync {
+                await self.deps.registrationBackupErrorPresenter.presentError(
+                    error: errorType,
+                    isQuickRestore: self.persistedState.restoreMode == .quickRestore
+                )
+            }.then { step in
+                switch step {
+                case .incorrectBackupKey:
+                    if self.persistedState.restoreMode == .manualRestore {
+                        // If manual restore, there's not much of a recovery path here
+                        // so just skip restoring and continue
+                        return self.updateRestoreMethod(method: .declined)
+                    }
+                    return .value(.enterBackupKey)
+                case .skipRestore:
+                    return self.updateRestoreMethod(method: .declined)
+                case .tryAgain, .restartQuickRestore, .none:
+                    return self.nextStep()
+                }
+            }
         }
     }
 
@@ -1600,6 +1650,7 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
             // if backup, show the confirmation screen
             return .value(.confirmRestoreFromBackup(
                 RegistrationRestoreFromBackupConfirmationState(
+                    mode: .quickRestore,
                     tier: registrationMessage.tier ?? .free,
                     lastBackupDate: registrationMessage.backupTimestamp.map(Date.init(millisecondsSince1970:)),
                     lastBackupSizeBytes: registrationMessage.backupSizeBytes.map(UInt.init)
@@ -1657,10 +1708,10 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
             return askForPinStep
         }
 
-        if inMemoryState.needsToAskForDeviceTransfer && !persistedState.hasDeclinedTransfer {
+        if inMemoryState.needsToAskForDeviceTransfer && inMemoryState.restoreMethod == nil {
             if deps.featureFlags.backupFileAlphaRegistrationFlow {
                 return .value(.chooseRestoreMethod(.unspecified))
-            } else {
+            } else if !persistedState.hasDeclinedTransfer {
                 return .value(.transferSelection)
             }
         } else if
@@ -2523,10 +2574,12 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
                 case .pushUnsupported, .timeout, .genericError:
                     apnsToken = nil
                 }
-                return strongSelf.deps.sessionManager.beginOrRestoreSession(
-                    e164: e164,
-                    apnsToken: apnsToken
-                ).then(on: strongSelf.schedulers.main) { [weak self] response -> Guarantee<RegistrationStep> in
+                return Guarantee.wrapAsync {
+                    await strongSelf.deps.sessionManager.beginOrRestoreSession(
+                        e164: e164,
+                        apnsToken: apnsToken
+                    )
+                }.then(on: strongSelf.schedulers.main) { [weak self] response -> Guarantee<RegistrationStep> in
                     guard let strongSelf = self else {
                         return unretainedSelfError()
                     }
@@ -2592,10 +2645,12 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
         transport: Registration.CodeTransport,
         retriesLeft: Int = Constants.networkErrorRetries
     ) -> Guarantee<RegistrationStep> {
-        return deps.sessionManager.requestVerificationCode(
-            for: session,
-            transport: transport
-        ).then(on: schedulers.main) { [weak self] (result: Registration.UpdateSessionResponse) -> Guarantee<RegistrationStep> in
+        return Guarantee.wrapAsync {
+            await self.deps.sessionManager.requestVerificationCode(
+                for: session,
+                transport: transport
+            )
+        }.then(on: schedulers.main) { [weak self] (result: Registration.UpdateSessionResponse) -> Guarantee<RegistrationStep> in
             guard let self else {
                 return unretainedSelfError()
             }
@@ -2854,7 +2909,7 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
             // Our fourth choice: a push challenge where we're still waiting for the challenge token.
             if
                 requestsPushChallenge,
-                let timeToWaitUntil = pushChallengeRequestDate?.addingTimeInterval(Constants.pushTokenTimeout),
+                let timeToWaitUntil = pushChallengeRequestDate?.addingTimeInterval(deps.timeoutProvider.pushTokenTimeout),
                 deps.dateProvider() < timeToWaitUntil
             {
                 let timeout = timeToWaitUntil.timeIntervalSince(deps.dateProvider())
@@ -2890,7 +2945,7 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
         }()
         if
             requestsPushChallenge,
-            let timeToWaitUntil = pushChallengeRequestDate?.addingTimeInterval(Constants.pushTokenMinWaitTime),
+            let timeToWaitUntil = pushChallengeRequestDate?.addingTimeInterval(deps.timeoutProvider.pushTokenMinWaitTime),
             deps.dateProvider() < timeToWaitUntil
         {
             let timeout = timeToWaitUntil.timeIntervalSince(deps.dateProvider())
@@ -2913,10 +2968,12 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
             Logger.info("Submitting push challenge fulfillment")
         }
 
-        return deps.sessionManager.fulfillChallenge(
-            for: session,
-            fulfillment: fulfillment
-        ).then(on: schedulers.main) { [weak self] (result: Registration.UpdateSessionResponse) -> Guarantee<RegistrationStep> in
+        return Guarantee.wrapAsync {
+            await self.deps.sessionManager.fulfillChallenge(
+                for: session,
+                fulfillment: fulfillment
+            )
+        }.then(on: schedulers.main) { [weak self] (result: Registration.UpdateSessionResponse) -> Guarantee<RegistrationStep> in
             guard let self else {
                 return unretainedSelfError()
             }
@@ -2999,10 +3056,12 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
             }
         }
 
-        return deps.sessionManager.submitVerificationCode(
-            for: session,
-            code: code
-        ).then(on: schedulers.main) { [weak self] (result: Registration.UpdateSessionResponse) -> Guarantee<RegistrationStep> in
+        return Guarantee.wrapAsync {
+            await self.deps.sessionManager.submitVerificationCode(
+                for: session,
+                code: code
+            )
+        }.then(on: schedulers.main) { [weak self] (result: Registration.UpdateSessionResponse) -> Guarantee<RegistrationStep> in
             guard let self else {
                 return unretainedSelfError()
             }
@@ -3911,9 +3970,11 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
             if persistedState.hasResetForReRegistration.negated {
                 db.write { tx in
                     let isPrimaryDevice = deps.tsAccountManager.registrationState(tx: tx).isPrimaryDevice ?? true
+                    let discoverability = deps.phoneNumberDiscoverabilityManager.phoneNumberDiscoverability(tx: tx)
                     deps.registrationStateChangeManager.resetForReregistration(
                         localPhoneNumber: state.e164,
                         localAci: state.aci,
+                        discoverability: discoverability,
                         wasPrimaryDevice: isPrimaryDevice,
                         tx: tx
                     )
@@ -4785,13 +4846,6 @@ public class RegistrationCoordinatorImpl: RegistrationCoordinator {
         // though. This is how many tries they have before we wipe our local state and make
         // them go through re-registration.
         static let maxLocalPINGuesses: UInt = 10
-
-        /// How long we wait for a push challenge to the exclusion of all else after requesting one.
-        /// Even if we have another challenge to fulfill, we will wait this long before proceeding.
-        static let pushTokenMinWaitTime: TimeInterval = 3
-        /// How long we block waiting for a push challenge after requesting one.
-        /// We might still fulfill the challenge after this, but we won't opportunistically block proceeding.
-        static let pushTokenTimeout: TimeInterval = 30
     }
 }
 

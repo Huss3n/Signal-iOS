@@ -28,11 +28,8 @@ extension DonationPaymentDetailsViewController {
                             amount: self.donationAmount, creditOrDebitCard: creditOrDebitCard
                         )
 
-                        switch try await DonationViewsUtil.Gifts.showSafetyNumberConfirmationIfNecessary(for: thread).promise.awaitable() {
-                        case .userDidNotConfirmSafetyNumberChange:
+                        guard await DonationViewsUtil.Gifts.showSafetyNumberConfirmationIfNecessary(for: thread) else {
                             throw DonationViewsUtil.Gifts.SendGiftError.userCanceledBeforeChargeCompleted
-                        case .userConfirmedSafetyNumberChangeOrNoChangeWasNeeded:
-                            break
                         }
 
                         try await DonationViewsUtil.Gifts.startJob(
@@ -42,7 +39,7 @@ extension DonationPaymentDetailsViewController {
                             messageText: messageText,
                             databaseStorage: SSKEnvironment.shared.databaseStorageRef,
                             blockingManager: SSKEnvironment.shared.blockingManagerRef
-                        ).awaitable()
+                        )
                     }
                 )
                 Logger.info("[Gifting] Gifting card donation finished")

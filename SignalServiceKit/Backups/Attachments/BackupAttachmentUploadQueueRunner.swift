@@ -23,7 +23,7 @@ public protocol BackupAttachmentUploadQueueRunner {
     func backUpAllAttachments() async throws
 }
 
-extension BackupAttachmentUploadQueueRunner {
+extension BackupAttachmentUploadQueueRunner where Self: Sendable {
 
     public func backUpAllAttachmentsAfterTxCommits(
         tx: DBWriteTransaction
@@ -36,37 +36,36 @@ extension BackupAttachmentUploadQueueRunner {
     }
 }
 
-public class BackupAttachmentUploadQueueRunnerImpl: BackupAttachmentUploadQueueRunner {
+class BackupAttachmentUploadQueueRunnerImpl: BackupAttachmentUploadQueueRunner {
 
     private let attachmentStore: AttachmentStore
     private let backupAttachmentUploadScheduler: BackupAttachmentUploadScheduler
     private let backupAttachmentUploadStore: BackupAttachmentUploadStore
     private let backupRequestManager: BackupRequestManager
     private let backupSettingsStore: BackupSettingsStore
-    private let backupSubscriptionManager: BackupSubscriptionManager
     private let db: any DB
     private let listMediaManager: BackupListMediaManager
     private let progress: BackupAttachmentUploadProgress
-    private let statusManager: BackupAttachmentQueueStatusUpdates
+    private let statusManager: BackupAttachmentUploadQueueStatusManager
     private let taskQueue: TaskQueueLoader<TaskRunner>
     private let tsAccountManager: TSAccountManager
 
-    public init(
+    init(
         appReadiness: AppReadiness,
         attachmentStore: AttachmentStore,
         attachmentUploadManager: AttachmentUploadManager,
         backupAttachmentUploadScheduler: BackupAttachmentUploadScheduler,
         backupAttachmentUploadStore: BackupAttachmentUploadStore,
+        backupAttachmentUploadEraStore: BackupAttachmentUploadEraStore,
         backupKeyMaterial: BackupKeyMaterial,
         backupListMediaManager: BackupListMediaManager,
         backupRequestManager: BackupRequestManager,
         backupSettingsStore: BackupSettingsStore,
-        backupSubscriptionManager: BackupSubscriptionManager,
         dateProvider: @escaping DateProvider,
         db: any DB,
         orphanedBackupAttachmentStore: OrphanedBackupAttachmentStore,
         progress: BackupAttachmentUploadProgress,
-        statusManager: BackupAttachmentQueueStatusUpdates,
+        statusManager: BackupAttachmentUploadQueueStatusManager,
         tsAccountManager: TSAccountManager
     ) {
         self.attachmentStore = attachmentStore
@@ -74,7 +73,6 @@ public class BackupAttachmentUploadQueueRunnerImpl: BackupAttachmentUploadQueueR
         self.backupAttachmentUploadStore = backupAttachmentUploadStore
         self.backupRequestManager = backupRequestManager
         self.backupSettingsStore = backupSettingsStore
-        self.backupSubscriptionManager = backupSubscriptionManager
         self.db = db
         self.listMediaManager = backupListMediaManager
         self.progress = progress
@@ -85,10 +83,10 @@ public class BackupAttachmentUploadQueueRunnerImpl: BackupAttachmentUploadQueueR
             attachmentUploadManager: attachmentUploadManager,
             backupAttachmentUploadScheduler: backupAttachmentUploadScheduler,
             backupAttachmentUploadStore: backupAttachmentUploadStore,
+            backupAttachmentUploadEraStore: backupAttachmentUploadEraStore,
             backupKeyMaterial: backupKeyMaterial,
             backupRequestManager: backupRequestManager,
             backupSettingsStore: backupSettingsStore,
-            backupSubscriptionManager: backupSubscriptionManager,
             dateProvider: dateProvider,
             db: db,
             orphanedBackupAttachmentStore: orphanedBackupAttachmentStore,
@@ -105,6 +103,9 @@ public class BackupAttachmentUploadQueueRunnerImpl: BackupAttachmentUploadQueueR
 
         appReadiness.runNowOrWhenMainAppDidBecomeReadyAsync { [weak self] in
             self?.startObservingQueueStatus()
+            Task { [weak self] in
+                try await self?.backUpAllAttachments()
+            }
         }
     }
 
@@ -125,9 +126,9 @@ public class BackupAttachmentUploadQueueRunnerImpl: BackupAttachmentUploadQueueR
         }
 
         switch backupPlan {
-        case .disabled, .free:
+        case .disabled, .disabling, .free:
             return
-        case .paid, .paidExpiringSoon:
+        case .paid, .paidExpiringSoon, .paidAsTester:
             break
         }
 
@@ -169,7 +170,22 @@ public class BackupAttachmentUploadQueueRunnerImpl: BackupAttachmentUploadQueueR
             try await listMediaManager.queryListMediaIfNeeded()
         }
 
-        try await taskQueue.loadAndRunTasks()
+        switch await statusManager.beginObservingIfNecessary() {
+        case .running:
+            Logger.info("Running Backup uploads.")
+            try await taskQueue.loadAndRunTasks()
+        case .empty:
+            return
+        case .notRegisteredAndReady:
+            Logger.warn("Skipping Backup uploads: not registered and ready.")
+            try await taskQueue.stop()
+        case .noWifiReachability:
+            Logger.warn("Skipping Backup uploads: need wifi.")
+            try await taskQueue.stop()
+        case .lowBattery:
+            Logger.warn("Skipping Backup uploads: low battery.")
+            try await taskQueue.stop()
+        }
     }
 
     // MARK: - Observation
@@ -177,16 +193,14 @@ public class BackupAttachmentUploadQueueRunnerImpl: BackupAttachmentUploadQueueR
     private func startObservingQueueStatus() {
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(queueStatusDidChange(_:)),
-            name: BackupAttachmentQueueStatus.didChangeNotification,
+            selector: #selector(queueStatusDidChange),
+            name: .backupAttachmentUploadQueueStatusDidChange,
             object: nil
         )
     }
 
     @objc
-    private func queueStatusDidChange(_ notification: Notification) {
-        let type = notification.userInfo?[BackupAttachmentQueueStatus.notificationQueueTypeKey]
-        guard type as? BackupAttachmentQueueType == .upload else { return }
+    private func queueStatusDidChange() {
         Task {
             try await self.backUpAllAttachments()
         }
@@ -200,15 +214,15 @@ public class BackupAttachmentUploadQueueRunnerImpl: BackupAttachmentUploadQueueR
         private let attachmentUploadManager: AttachmentUploadManager
         private let backupAttachmentUploadScheduler: BackupAttachmentUploadScheduler
         private let backupAttachmentUploadStore: BackupAttachmentUploadStore
+        private let backupAttachmentUploadEraStore: BackupAttachmentUploadEraStore
         private let backupKeyMaterial: BackupKeyMaterial
         private let backupRequestManager: BackupRequestManager
         private let backupSettingsStore: BackupSettingsStore
-        private let backupSubscriptionManager: BackupSubscriptionManager
         private let dateProvider: DateProvider
         private let db: any DB
         private let orphanedBackupAttachmentStore: OrphanedBackupAttachmentStore
         private let progress: BackupAttachmentUploadProgress
-        private let statusManager: BackupAttachmentQueueStatusUpdates
+        private let statusManager: BackupAttachmentUploadQueueStatusManager
         private let tsAccountManager: TSAccountManager
 
         let store: TaskStore
@@ -218,25 +232,25 @@ public class BackupAttachmentUploadQueueRunnerImpl: BackupAttachmentUploadQueueR
             attachmentUploadManager: AttachmentUploadManager,
             backupAttachmentUploadScheduler: BackupAttachmentUploadScheduler,
             backupAttachmentUploadStore: BackupAttachmentUploadStore,
+            backupAttachmentUploadEraStore: BackupAttachmentUploadEraStore,
             backupKeyMaterial: BackupKeyMaterial,
             backupRequestManager: BackupRequestManager,
             backupSettingsStore: BackupSettingsStore,
-            backupSubscriptionManager: BackupSubscriptionManager,
             dateProvider: @escaping DateProvider,
             db: any DB,
             orphanedBackupAttachmentStore: OrphanedBackupAttachmentStore,
             progress: BackupAttachmentUploadProgress,
-            statusManager: BackupAttachmentQueueStatusUpdates,
+            statusManager: BackupAttachmentUploadQueueStatusManager,
             tsAccountManager: TSAccountManager
         ) {
             self.attachmentStore = attachmentStore
             self.attachmentUploadManager = attachmentUploadManager
             self.backupAttachmentUploadScheduler = backupAttachmentUploadScheduler
             self.backupAttachmentUploadStore = backupAttachmentUploadStore
+            self.backupAttachmentUploadEraStore = backupAttachmentUploadEraStore
             self.backupKeyMaterial = backupKeyMaterial
             self.backupRequestManager = backupRequestManager
             self.backupSettingsStore = backupSettingsStore
-            self.backupSubscriptionManager = backupSubscriptionManager
             self.dateProvider = dateProvider
             self.db = db
             self.orphanedBackupAttachmentStore = orphanedBackupAttachmentStore
@@ -267,7 +281,7 @@ public class BackupAttachmentUploadQueueRunnerImpl: BackupAttachmentUploadQueueR
                 return (
                     self.attachmentStore.fetch(id: record.record.attachmentRowId, tx: tx),
                     self.backupSettingsStore.backupPlan(tx: tx),
-                    self.backupSubscriptionManager.getUploadEra(tx: tx)
+                    self.backupAttachmentUploadEraStore.currentUploadEra(tx: tx)
                 )
             }
             guard let attachment else {
@@ -288,7 +302,8 @@ public class BackupAttachmentUploadQueueRunnerImpl: BackupAttachmentUploadQueueR
                     if record.record.isFullsize {
                         let mediaId = try backupKeyMaterial.mediaEncryptionMetadata(
                             mediaName: mediaName,
-                            type: .attachment,
+                            // Doesn't matter what we use, we just want the mediaId
+                            type: .outerLayerFullsizeOrThumbnail,
                             tx: tx
                         ).mediaId
                         try orphanedBackupAttachmentStore.removeFullsize(
@@ -299,7 +314,8 @@ public class BackupAttachmentUploadQueueRunnerImpl: BackupAttachmentUploadQueueR
                     } else {
                         let mediaId = try backupKeyMaterial.mediaEncryptionMetadata(
                             mediaName: AttachmentBackupThumbnail.thumbnailMediaName(fullsizeMediaName: mediaName),
-                            type: .thumbnail,
+                            // Doesn't matter what we use, we just want the mediaId
+                            type: .outerLayerFullsizeOrThumbnail,
                             tx: tx
                         ).mediaId
                         try orphanedBackupAttachmentStore.removeThumbnail(
@@ -315,10 +331,10 @@ public class BackupAttachmentUploadQueueRunnerImpl: BackupAttachmentUploadQueueR
 
             struct IsFreeTierError: Error {}
             switch backupPlan {
-            case .disabled, .free:
+            case .disabled, .disabling, .free:
                 try? await loader.stop()
                 return .retryableError(IsFreeTierError())
-            case .paid, .paidExpiringSoon:
+            case .paid, .paidExpiringSoon, .paidAsTester:
                 break
             }
 
@@ -398,22 +414,6 @@ public class BackupAttachmentUploadQueueRunnerImpl: BackupAttachmentUploadQueueR
                     )
                 }
             } catch let error {
-                switch await statusManager.jobDidExperienceError(type: .upload, error) {
-                case nil:
-                    // No state change, keep going.
-                    break
-                case .suspended:
-                    try? await loader.stop()
-                case .running:
-                    break
-                case .empty:
-                    // The queue will stop on its own, finish this task.
-                    break
-                case .lowDiskSpace, .lowBattery, .noWifiReachability, .notRegisteredAndReady:
-                    // Stop the queue now proactively.
-                    try? await loader.stop()
-                }
-
                 switch error as? BackupArchive.Response.CopyToMediaTierError {
                 case .sourceObjectNotFound:
                     // Any time we find this error, retry. It means the upload
@@ -482,7 +482,7 @@ public class BackupAttachmentUploadQueueRunnerImpl: BackupAttachmentUploadQueueR
 
         func didDrainQueue() async {
             await progress.didEmptyUploadQueue()
-            await statusManager.didEmptyQueue(type: .upload)
+            await statusManager.didEmptyQueue()
         }
     }
 

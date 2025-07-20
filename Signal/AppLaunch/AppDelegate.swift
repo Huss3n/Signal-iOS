@@ -319,6 +319,14 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         )
         attachmentValidationRunner.registerBGProcessingTask(appReadiness: appReadiness)
 
+        let backupSettingsStore = BackupSettingsStore()
+        let backupRunner = BackupBGProcessingTaskRunner(
+            backupSettingsStore: backupSettingsStore,
+            db: databaseStorage,
+            exportJob: { DependenciesBridge.shared.backupExportJob }
+        )
+        backupRunner.registerBGProcessingTask(appReadiness: appReadiness)
+
         let databaseMigratorRunner = LazyDatabaseMigratorRunner(
             backgroundMessageFetcherFactory: { DependenciesBridge.shared.backgroundMessageFetcherFactory },
             databaseStorage: databaseStorage,
@@ -332,6 +340,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                 attachmentMigrationRunner.scheduleBGProcessingTaskIfNeeded()
             }
             attachmentValidationRunner.scheduleBGProcessingTaskIfNeeded()
+            backupRunner.scheduleBGProcessingTaskIfNeeded()
         }
 
         appReadiness.runNowOrWhenAppDidBecomeReadyAsync {
@@ -349,7 +358,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                 // Lastly, these are one-off migrations, and most test devices will run
                 // them immediately and never again, so running them redundantly will help
                 // provide coverage for otherwise dead code.
-                if databaseMigratorRunner.shouldLaunchBGProcessingTask() || databaseMigratorRunner.simulatePriorCancellation() {
+                if databaseMigratorRunner.startCondition() != .never || databaseMigratorRunner.simulatePriorCancellation() {
                     try await databaseMigratorRunner.run()
                 }
                 #endif
@@ -517,7 +526,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             appReadiness.runNowOrWhenAppDidBecomeReadySync {
                 DispatchQueue.global(qos: .userInitiated).async {
                     let chatConnectionManager = DependenciesBridge.shared.chatConnectionManager
-                    if chatConnectionManager.shouldWaitForSocketToMakeRequest(connectionType: .identified) {
+                    if chatConnectionManager.shouldSocketBeOpen_restOnly(connectionType: .identified) {
                         // Immediately let the NSE know we will handle this notification so that it
                         // does not attempt to process messages while we are active.
                         DarwinNotificationCenter.postNotification(name: .mainAppHandledNotification)

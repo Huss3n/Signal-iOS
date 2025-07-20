@@ -102,7 +102,7 @@ public class PaymentsImpl: NSObject, PaymentsSwift {
         }
     }
 
-    private func getOrBuildCurrentApi(paymentsEntropy: Data) -> Promise<MobileCoinAPI> {
+    private func getOrBuildCurrentApi(paymentsEntropy: Data) async throws -> MobileCoinAPI {
         func getCurrentApi() -> MobileCoinAPI? {
             return Self.unfairLock.withLock { () -> MobileCoinAPI? in
                 if let handle = self.currentApiHandle,
@@ -120,29 +120,26 @@ public class PaymentsImpl: NSObject, PaymentsSwift {
         }
 
         if let api = getCurrentApi() {
-            return Promise.value(api)
-        }
-
-        return firstly(on: DispatchQueue.global()) {
-            MobileCoinAPI.buildPromise(paymentsEntropy: paymentsEntropy)
-        }.map(on: DispatchQueue.global()) { (api: MobileCoinAPI) -> MobileCoinAPI in
-            setCurrentApi(api)
             return api
         }
+
+        let api = try await MobileCoinAPI.build(paymentsEntropy: paymentsEntropy)
+        setCurrentApi(api)
+        return api
     }
 
     // Instances of MobileCoinAPI are slightly expensive to
     // build since we need to obtain authentication from
     // the service, so we cache and reuse instances.
-    func getMobileCoinAPI() -> Promise<MobileCoinAPI> {
+    func getMobileCoinAPI() async throws -> MobileCoinAPI {
         guard !CurrentAppContext().isNSE else {
-            return Promise(error: OWSAssertionError("Payments disabled in NSE."))
+            throw OWSAssertionError("Payments disabled in NSE.")
         }
         switch paymentsState {
         case .enabled(let paymentsEntropy):
-            return getOrBuildCurrentApi(paymentsEntropy: paymentsEntropy)
+            return try await getOrBuildCurrentApi(paymentsEntropy: paymentsEntropy)
         case .disabled, .disabledWithPaymentsEntropy:
-            return Promise(error: PaymentsError.notEnabled)
+            throw PaymentsError.notEnabled
         }
     }
 
@@ -267,23 +264,23 @@ public class PaymentsImpl: NSObject, PaymentsSwift {
             return
         }
 
-        firstly {
-            self.updateCurrentPaymentBalancePromise()
-        }.catch { error in
-            let paymentsError = error as? PaymentsError
-            let outdated = paymentsError == .outdatedClient || paymentsError == .attestationVerificationFailed
-            SSKEnvironment.shared.paymentsHelperRef.setPaymentsVersionOutdated(outdated)
-            owsFailDebugUnlessMCNetworkFailure(error)
+        Task { @MainActor in
+            do {
+                _ = try await _updateCurrentPaymentBalance()
+            } catch {
+                let paymentsError = error as? PaymentsError
+                let outdated = paymentsError == .outdatedClient || paymentsError == .attestationVerificationFailed
+                SSKEnvironment.shared.paymentsHelperRef.setPaymentsVersionOutdated(outdated)
+                owsFailDebugUnlessMCNetworkFailure(error)
+            }
         }
     }
 
-    public func updateCurrentPaymentBalancePromise() -> Promise<TSPaymentAmount> {
-        return firstly { () -> Promise<TSPaymentAmount> in
-            self.getCurrentBalance()
-        }.map { (balance: TSPaymentAmount) -> TSPaymentAmount in
-            self.setCurrentPaymentBalance(amount: balance)
-            return balance
-        }
+    @MainActor
+    private func _updateCurrentPaymentBalance() async throws -> TSPaymentAmount {
+        let balance = try await self.getCurrentBalance()
+        self.setCurrentPaymentBalance(amount: balance)
+        return balance
     }
 
     private func updateCurrentPaymentBalanceIfNecessary() {
@@ -321,30 +318,28 @@ public class PaymentsImpl: NSObject, PaymentsSwift {
 
 public extension PaymentsImpl {
 
-    private func fetchPublicAddress(for recipientAci: Aci) -> Promise<MobileCoin.PublicAddress> {
-        return Promise.wrapAsync {
-            let profileFetcher = SSKEnvironment.shared.profileFetcherRef
-            let fetchedProfile = try await profileFetcher.fetchProfile(for: recipientAci)
+    private func fetchPublicAddress(for recipientAci: Aci) async throws -> MobileCoin.PublicAddress {
+        let profileFetcher = SSKEnvironment.shared.profileFetcherRef
+        let fetchedProfile = try await profileFetcher.fetchProfile(for: recipientAci)
 
-            guard let decryptedProfile = fetchedProfile.decryptedProfile else {
-                throw PaymentsError.userHasNoPublicAddress
-            }
+        guard let decryptedProfile = fetchedProfile.decryptedProfile else {
+            throw PaymentsError.userHasNoPublicAddress
+        }
 
-            // We don't need to persist this value in the cache; the ProfileFetcher
-            // will take care of that.
-            guard
-                let paymentAddress = decryptedProfile.paymentAddress(identityKey: fetchedProfile.identityKey),
-                paymentAddress.isValid,
-                paymentAddress.currency == .mobileCoin
-            else {
-                throw PaymentsError.userHasNoPublicAddress
-            }
-            do {
-                return try paymentAddress.asPublicAddress()
-            } catch {
-                owsFailDebug("Can't parse public address: \(error)")
-                throw PaymentsError.userHasNoPublicAddress
-            }
+        // We don't need to persist this value in the cache; the ProfileFetcher
+        // will take care of that.
+        guard
+            let paymentAddress = decryptedProfile.paymentAddress(identityKey: fetchedProfile.identityKey),
+            paymentAddress.isValid,
+            paymentAddress.currency == .mobileCoin
+        else {
+            throw PaymentsError.userHasNoPublicAddress
+        }
+        do {
+            return try paymentAddress.asPublicAddress()
+        } catch {
+            owsFailDebug("Can't parse public address: \(error)")
+            throw PaymentsError.userHasNoPublicAddress
         }
     }
 
@@ -357,61 +352,59 @@ public extension PaymentsImpl {
         transaction: MobileCoin.Transaction,
         receipt: MobileCoin.Receipt,
         isOutgoingTransfer: Bool
-    ) -> Promise<TSPaymentModel> {
+    ) async throws -> TSPaymentModel {
         guard !isKillSwitchActive else {
-            return Promise(error: PaymentsError.killSwitch)
+            throw PaymentsError.killSwitch
         }
-        return firstly(on: DispatchQueue.global()) {
-            let recipientPublicAddressData = recipientPublicAddress.serializedData
-            guard paymentAmount.currency == .mobileCoin,
-                  paymentAmount.isValidAmount(canBeEmpty: false) else {
-                throw OWSAssertionError("Invalid amount.")
-            }
-            guard feeAmount.currency == .mobileCoin,
-                  feeAmount.isValidAmount(canBeEmpty: false) else {
-                throw OWSAssertionError("Invalid fee.")
-            }
-
-            let mcTransactionData = transaction.serializedData
-            let mcReceiptData = receipt.serializedData
-            let paymentType: TSPaymentType = isOutgoingTransfer ? .outgoingTransfer : .outgoingPayment
-            let inputKeyImages = Array(Set(transaction.inputKeyImages))
-            owsAssertDebug(inputKeyImages.count == transaction.inputKeyImages.count)
-            let outputPublicKeys = Array(Set(transaction.outputPublicKeys))
-            owsAssertDebug(outputPublicKeys.count == transaction.outputPublicKeys.count)
-
-            let mobileCoin = MobileCoinPayment(recipientPublicAddressData: recipientPublicAddressData,
-                                               transactionData: mcTransactionData,
-                                               receiptData: mcReceiptData,
-                                               incomingTransactionPublicKeys: nil,
-                                               spentKeyImages: inputKeyImages,
-                                               outputPublicKeys: outputPublicKeys,
-                                               ledgerBlockTimestamp: 0,
-                                               ledgerBlockIndex: 0,
-                                               feeAmount: feeAmount)
-
-            let paymentModel = TSPaymentModel(
-                paymentType: paymentType,
-                paymentState: .outgoingUnsubmitted,
-                paymentAmount: paymentAmount,
-                createdDate: Date(),
-                senderOrRecipientAci: recipientAci.map { AciObjC($0) },
-                memoMessage: memoMessage?.nilIfEmpty,
-                isUnread: false,
-                interactionUniqueId: nil,
-                mobileCoin: mobileCoin
-            )
-
-            guard paymentModel.isValid else {
-                throw OWSAssertionError("Invalid paymentModel.")
-            }
-
-            try SSKEnvironment.shared.databaseStorageRef.write { transaction in
-                try SSKEnvironment.shared.paymentsHelperRef.tryToInsertPaymentModel(paymentModel, transaction: transaction)
-            }
-
-            return paymentModel
+        let recipientPublicAddressData = recipientPublicAddress.serializedData
+        guard paymentAmount.currency == .mobileCoin, paymentAmount.isValidAmount(canBeEmpty: false) else {
+            throw OWSAssertionError("Invalid amount.")
         }
+        guard feeAmount.currency == .mobileCoin, feeAmount.isValidAmount(canBeEmpty: false) else {
+            throw OWSAssertionError("Invalid fee.")
+        }
+
+        let mcTransactionData = transaction.serializedData
+        let mcReceiptData = receipt.serializedData
+        let paymentType: TSPaymentType = isOutgoingTransfer ? .outgoingTransfer : .outgoingPayment
+        let inputKeyImages = Array(Set(transaction.inputKeyImages))
+        owsAssertDebug(inputKeyImages.count == transaction.inputKeyImages.count)
+        let outputPublicKeys = Array(Set(transaction.outputPublicKeys))
+        owsAssertDebug(outputPublicKeys.count == transaction.outputPublicKeys.count)
+
+        let mobileCoin = MobileCoinPayment(
+            recipientPublicAddressData: recipientPublicAddressData,
+            transactionData: mcTransactionData,
+            receiptData: mcReceiptData,
+            incomingTransactionPublicKeys: nil,
+            spentKeyImages: inputKeyImages,
+            outputPublicKeys: outputPublicKeys,
+            ledgerBlockTimestamp: 0,
+            ledgerBlockIndex: 0,
+            feeAmount: feeAmount,
+        )
+
+        let paymentModel = TSPaymentModel(
+            paymentType: paymentType,
+            paymentState: .outgoingUnsubmitted,
+            paymentAmount: paymentAmount,
+            createdDate: Date(),
+            senderOrRecipientAci: recipientAci.map { AciObjC($0) },
+            memoMessage: memoMessage?.nilIfEmpty,
+            isUnread: false,
+            interactionUniqueId: nil,
+            mobileCoin: mobileCoin,
+        )
+
+        guard paymentModel.isValid else {
+            throw OWSAssertionError("Invalid paymentModel.")
+        }
+
+        try await SSKEnvironment.shared.databaseStorageRef.awaitableWrite { transaction in
+            try SSKEnvironment.shared.paymentsHelperRef.tryToInsertPaymentModel(paymentModel, transaction: transaction)
+        }
+
+        return paymentModel
     }
 }
 
@@ -498,12 +491,9 @@ public extension PaymentsImpl {
 // MARK: - Current Balance
 
 public extension PaymentsImpl {
-    func getCurrentBalance() -> Promise<TSPaymentAmount> {
-        firstly { () -> Promise<MobileCoinAPI> in
-            self.getMobileCoinAPI()
-        }.then(on: DispatchQueue.global()) { (mobileCoinAPI: MobileCoinAPI) in
-            return mobileCoinAPI.getLocalBalance()
-        }
+    func getCurrentBalance() async throws -> TSPaymentAmount {
+        let mobileCoinAPI = try await self.getMobileCoinAPI()
+        return try await mobileCoinAPI.getLocalBalance().awaitable()
     }
 }
 
@@ -512,20 +502,17 @@ public extension PaymentsImpl {
 public extension PaymentsImpl {
 
     func maximumPaymentAmount() async throws -> TSPaymentAmount {
-        let mobileCoinAPI = try await self.getMobileCoinAPI().awaitable()
+        let mobileCoinAPI = try await self.getMobileCoinAPI()
         return try await mobileCoinAPI.maxTransactionAmount()
     }
 
-    func getEstimatedFee(forPaymentAmount paymentAmount: TSPaymentAmount) -> Promise<TSPaymentAmount> {
+    func getEstimatedFee(forPaymentAmount paymentAmount: TSPaymentAmount) async throws -> TSPaymentAmount {
         guard paymentAmount.currency == .mobileCoin else {
-            return Promise(error: OWSAssertionError("Invalid currency."))
+            throw OWSAssertionError("Invalid currency.")
         }
 
-        return firstly(on: DispatchQueue.global()) { () -> Promise<MobileCoinAPI> in
-            self.getMobileCoinAPI()
-        }.then(on: DispatchQueue.global()) { (mobileCoinAPI: MobileCoinAPI) -> Promise<TSPaymentAmount> in
-            try mobileCoinAPI.getEstimatedFee(forPaymentAmount: paymentAmount)
-        }
+        let mobileCoinAPI = try await self.getMobileCoinAPI()
+        return try await mobileCoinAPI.getEstimatedFee(forPaymentAmount: paymentAmount)
     }
 
     func prepareOutgoingPayment(
@@ -534,40 +521,36 @@ public extension PaymentsImpl {
         memoMessage: String?,
         isOutgoingTransfer: Bool,
         canDefragment: Bool
-    ) -> Promise<PreparedPayment> {
-
+    ) async throws -> PreparedPayment {
         guard !isKillSwitchActive else {
-            return Promise(error: PaymentsError.killSwitch)
+            throw PaymentsError.killSwitch
         }
         guard let recipient = recipient as? SendPaymentRecipientImpl else {
-            return Promise(error: OWSAssertionError("Invalid recipient."))
+            throw OWSAssertionError("Invalid recipient.")
         }
 
         switch recipient {
         case .address(let recipientAddress):
             // Cannot send "user-to-user" payment if kill switch is active.
             guard !SUIEnvironment.shared.paymentsRef.isKillSwitchActive else {
-                return Promise(error: PaymentsError.killSwitch)
+                throw PaymentsError.killSwitch
             }
 
             guard let recipientAci = recipientAddress.serviceId as? Aci else {
-                return Promise(error: PaymentsError.userHasNoPublicAddress)
+                throw PaymentsError.userHasNoPublicAddress
             }
 
-            return firstly(on: DispatchQueue.global()) { () -> Promise<MobileCoin.PublicAddress> in
-                self.fetchPublicAddress(for: recipientAci)
-            }.then(on: DispatchQueue.global()) { (recipientPublicAddress: MobileCoin.PublicAddress) -> Promise<PreparedPayment> in
-                self.prepareOutgoingPayment(
-                    recipientAci: recipientAci,
-                    recipientPublicAddress: recipientPublicAddress,
-                    paymentAmount: paymentAmount,
-                    memoMessage: memoMessage,
-                    isOutgoingTransfer: isOutgoingTransfer,
-                    canDefragment: canDefragment
-                )
-            }
+            let recipientPublicAddress = try await self.fetchPublicAddress(for: recipientAci)
+            return try await self.prepareOutgoingPayment(
+                recipientAci: recipientAci,
+                recipientPublicAddress: recipientPublicAddress,
+                paymentAmount: paymentAmount,
+                memoMessage: memoMessage,
+                isOutgoingTransfer: isOutgoingTransfer,
+                canDefragment: canDefragment
+            )
         case .publicAddress(let recipientPublicAddress):
-            return prepareOutgoingPayment(
+            return try await prepareOutgoingPayment(
                 recipientAci: nil,
                 recipientPublicAddress: recipientPublicAddress,
                 paymentAmount: paymentAmount,
@@ -585,66 +568,58 @@ public extension PaymentsImpl {
         memoMessage: String?,
         isOutgoingTransfer: Bool,
         canDefragment: Bool
-    ) -> Promise<PreparedPayment> {
-
+    ) async throws -> PreparedPayment {
         guard !isKillSwitchActive else {
-            return Promise(error: PaymentsError.killSwitch)
+            throw PaymentsError.killSwitch
         }
         guard paymentAmount.currency == .mobileCoin else {
-            return Promise(error: OWSAssertionError("Invalid currency."))
+            throw OWSAssertionError("Invalid currency.")
         }
         guard recipientAci != DependenciesBridge.shared.tsAccountManager.localIdentifiersWithMaybeSneakyTransaction?.aci else {
-            return Promise(error: OWSAssertionError("Can't make payment to yourself."))
+            throw OWSAssertionError("Can't make payment to yourself.")
         }
 
-        return firstly(on: DispatchQueue.global()) { () -> Promise<MobileCoinAPI> in
-            self.getMobileCoinAPI()
-        }.then(on: DispatchQueue.global()) { (mobileCoinAPI: MobileCoinAPI) -> Promise<PreparedPayment> in
-            return firstly(on: DispatchQueue.global()) { () throws -> Promise<TSPaymentAmount> in
-                // prepareTransaction() will fail if local balance is not yet known.
-                mobileCoinAPI.getLocalBalance()
-            }.then(on: DispatchQueue.global()) { (balance: TSPaymentAmount) -> Promise<Void> in
-                return self.defragmentIfNecessary(forPaymentAmount: paymentAmount,
-                                                  mobileCoinAPI: mobileCoinAPI,
-                                                  canDefragment: canDefragment)
-            }.then(on: DispatchQueue.global()) { () -> Promise<MobileCoinAPI.PreparedTransaction> in
-                // prepareTransaction() will fail if local balance is not yet known.
-                let shouldUpdateBalance = self.currentPaymentBalance == nil
-                return mobileCoinAPI.prepareTransaction(paymentAmount: paymentAmount,
-                                                        recipientPublicAddress: recipientPublicAddress,
-                                                        shouldUpdateBalance: shouldUpdateBalance)
-            }.map(on: DispatchQueue.global()) { (preparedTransaction: MobileCoinAPI.PreparedTransaction) -> PreparedPayment in
-                PreparedPaymentImpl(
-                    recipientAci: recipientAci,
-                    recipientPublicAddress: recipientPublicAddress,
-                    paymentAmount: paymentAmount,
-                    memoMessage: memoMessage,
-                    isOutgoingTransfer: isOutgoingTransfer,
-                    preparedTransaction: preparedTransaction
-                )
-            }
-        }
+        let mobileCoinAPI = try await self.getMobileCoinAPI()
+        // prepareTransaction() will fail if local balance is not yet known.
+        _ = try await mobileCoinAPI.getLocalBalance().awaitable()
+        _ = try await self.defragmentIfNecessary(
+            forPaymentAmount: paymentAmount,
+            mobileCoinAPI: mobileCoinAPI,
+            canDefragment: canDefragment,
+        )
+        // prepareTransaction() will fail if local balance is not yet known.
+        let shouldUpdateBalance = self.currentPaymentBalance == nil
+        let preparedTransaction = try await mobileCoinAPI.prepareTransaction(
+            paymentAmount: paymentAmount,
+            recipientPublicAddress: recipientPublicAddress,
+            shouldUpdateBalance: shouldUpdateBalance,
+        ).awaitable()
+        return PreparedPaymentImpl(
+            recipientAci: recipientAci,
+            recipientPublicAddress: recipientPublicAddress,
+            paymentAmount: paymentAmount,
+            memoMessage: memoMessage,
+            isOutgoingTransfer: isOutgoingTransfer,
+            preparedTransaction: preparedTransaction
+        )
     }
 
-    private func defragmentIfNecessary(forPaymentAmount paymentAmount: TSPaymentAmount,
-                                       mobileCoinAPI: MobileCoinAPI,
-                                       canDefragment: Bool) -> Promise<Void> {
-        return firstly(on: DispatchQueue.global()) { () throws -> Promise<Bool> in
-            mobileCoinAPI.requiresDefragmentation(forPaymentAmount: paymentAmount)
-        }.then(on: DispatchQueue.global()) { (shouldDefragment: Bool) -> Promise<Void> in
-            guard shouldDefragment else {
-                return Promise.value(())
-            }
-            guard canDefragment else {
-                throw PaymentsError.defragmentationRequired
-            }
-            return self.defragment(forPaymentAmount: paymentAmount,
-                                   mobileCoinAPI: mobileCoinAPI)
+    private func defragmentIfNecessary(
+        forPaymentAmount paymentAmount: TSPaymentAmount,
+        mobileCoinAPI: MobileCoinAPI,
+        canDefragment: Bool,
+    ) async throws {
+        let shouldDefragment = try await mobileCoinAPI.requiresDefragmentation(forPaymentAmount: paymentAmount).awaitable()
+        guard shouldDefragment else {
+            return
         }
+        guard canDefragment else {
+            throw PaymentsError.defragmentationRequired
+        }
+        return try await self.defragment(forPaymentAmount: paymentAmount, mobileCoinAPI: mobileCoinAPI)
     }
 
-    private func defragment(forPaymentAmount paymentAmount: TSPaymentAmount,
-                            mobileCoinAPI: MobileCoinAPI) -> Promise<Void> {
+    private func defragment(forPaymentAmount paymentAmount: TSPaymentAmount, mobileCoinAPI: MobileCoinAPI) async throws {
         Logger.info("")
 
         // 1. Prepare defragmentation transactions.
@@ -652,140 +627,138 @@ public extension PaymentsImpl {
         //   3. Submit defragmentation transactions (payment processor will do this).
         //   4. Verify defragmentation transactions (payment processor will do this).
         // 5. Block on verification of defragmentation transactions.
-        return firstly(on: DispatchQueue.global()) { () throws -> Promise<[MobileCoin.Transaction]> in
-            mobileCoinAPI.prepareDefragmentationStepTransactions(forPaymentAmount: paymentAmount)
-        }.map(on: DispatchQueue.global()) { (mcTransactions: [MobileCoin.Transaction]) -> [TSPaymentModel] in
-            Logger.info("mcTransactions: \(mcTransactions.count)")
+        let mcTransactions = try await mobileCoinAPI.prepareDefragmentationStepTransactions(forPaymentAmount: paymentAmount).awaitable()
+        Logger.info("mcTransactions: \(mcTransactions.count)")
 
-            // To initiate the defragmentation transactions, all we need to do
-            // is save TSPaymentModels to the database. The PaymentsProcessor
-            // will observe this and take responsibility for their submission,
-            // verification.
-            return try SSKEnvironment.shared.databaseStorageRef.write { dbTransaction in
-                try mcTransactions.map { mcTransaction in
-                    let paymentAmount = TSPaymentAmount(currency: .mobileCoin, picoMob: 0)
-                    let feeAmount = TSPaymentAmount(currency: .mobileCoin, picoMob: mcTransaction.fee)
-                    let mcTransactionData = mcTransaction.serializedData
-                    let inputKeyImages = Array(Set(mcTransaction.inputKeyImages))
-                    owsAssertDebug(inputKeyImages.count == mcTransaction.inputKeyImages.count)
-                    let outputPublicKeys = Array(Set(mcTransaction.outputPublicKeys))
-                    owsAssertDebug(outputPublicKeys.count == mcTransaction.outputPublicKeys.count)
-                    let mobileCoin = MobileCoinPayment(recipientPublicAddressData: nil,
-                                                       transactionData: mcTransactionData,
-                                                       receiptData: nil,
-                                                       incomingTransactionPublicKeys: nil,
-                                                       spentKeyImages: inputKeyImages,
-                                                       outputPublicKeys: outputPublicKeys,
-                                                       ledgerBlockTimestamp: 0,
-                                                       ledgerBlockIndex: 0,
-                                                       feeAmount: feeAmount)
+        // To initiate the defragmentation transactions, all we need to do
+        // is save TSPaymentModels to the database. The PaymentsProcessor
+        // will observe this and take responsibility for their submission,
+        // verification.
+        let paymentModels = try await SSKEnvironment.shared.databaseStorageRef.awaitableWrite { dbTransaction in
+            return try mcTransactions.map { mcTransaction in
+                let paymentAmount = TSPaymentAmount(currency: .mobileCoin, picoMob: 0)
+                let feeAmount = TSPaymentAmount(currency: .mobileCoin, picoMob: mcTransaction.fee)
+                let mcTransactionData = mcTransaction.serializedData
+                let inputKeyImages = Array(Set(mcTransaction.inputKeyImages))
+                owsAssertDebug(inputKeyImages.count == mcTransaction.inputKeyImages.count)
+                let outputPublicKeys = Array(Set(mcTransaction.outputPublicKeys))
+                owsAssertDebug(outputPublicKeys.count == mcTransaction.outputPublicKeys.count)
+                let mobileCoin = MobileCoinPayment(
+                    recipientPublicAddressData: nil,
+                    transactionData: mcTransactionData,
+                    receiptData: nil,
+                    incomingTransactionPublicKeys: nil,
+                    spentKeyImages: inputKeyImages,
+                    outputPublicKeys: outputPublicKeys,
+                    ledgerBlockTimestamp: 0,
+                    ledgerBlockIndex: 0,
+                    feeAmount: feeAmount,
+                )
 
-                    let paymentModel = TSPaymentModel(paymentType: .outgoingDefragmentation,
-                                                      paymentState: .outgoingUnsubmitted,
-                                                      paymentAmount: paymentAmount,
-                                                      createdDate: Date(),
-                                                      senderOrRecipientAci: nil,
-                                                      memoMessage: nil,
-                                                      isUnread: false,
-                                                      interactionUniqueId: nil,
-                                                      mobileCoin: mobileCoin)
+                let paymentModel = TSPaymentModel(
+                    paymentType: .outgoingDefragmentation,
+                    paymentState: .outgoingUnsubmitted,
+                    paymentAmount: paymentAmount,
+                    createdDate: Date(),
+                    senderOrRecipientAci: nil,
+                    memoMessage: nil,
+                    isUnread: false,
+                    interactionUniqueId: nil,
+                    mobileCoin: mobileCoin,
+                )
 
-                    guard paymentModel.isValid else {
-                        throw OWSAssertionError("Invalid paymentModel.")
-                    }
-
-                    try SSKEnvironment.shared.paymentsHelperRef.tryToInsertPaymentModel(paymentModel, transaction: dbTransaction)
-
-                    return paymentModel
+                guard paymentModel.isValid else {
+                    throw OWSAssertionError("Invalid paymentModel.")
                 }
+
+                try SSKEnvironment.shared.paymentsHelperRef.tryToInsertPaymentModel(paymentModel, transaction: dbTransaction)
+
+                return paymentModel
             }
-        }.then(on: DispatchQueue.global()) { (paymentModels: [TSPaymentModel]) -> Promise<Void> in
-            self.blockOnVerificationOfDefragmentation(paymentModels: paymentModels)
         }
+
+        return try await self.blockOnVerificationOfDefragmentation(paymentModels: paymentModels)
     }
 
-    func initiateOutgoingPayment(preparedPayment: PreparedPayment) -> Promise<TSPaymentModel> {
+    func initiateOutgoingPayment(preparedPayment: PreparedPayment) async throws -> TSPaymentModel {
         guard !isKillSwitchActive else {
-            return Promise(error: PaymentsError.killSwitch)
+            throw PaymentsError.killSwitch
         }
-        return firstly(on: DispatchQueue.global()) { () -> Promise<TSPaymentModel> in
-            guard let preparedPayment = preparedPayment as? PreparedPaymentImpl else {
-                throw OWSAssertionError("Invalid preparedPayment.")
-            }
-            let preparedTransaction = preparedPayment.preparedTransaction
+        guard let preparedPayment = preparedPayment as? PreparedPaymentImpl else {
+            throw OWSAssertionError("Invalid preparedPayment.")
+        }
+        let preparedTransaction = preparedPayment.preparedTransaction
 
-            // To initiate the outgoing payment, all we need to do is save
-            // the TSPaymentModel to the database. The PaymentsProcessor
-            // will observe this and take responsibility for the submission,
-            // verification and notification of the payment.
-            return self.upsertNewOutgoingPaymentModel(
-                recipientAci: preparedPayment.recipientAci,
-                recipientPublicAddress: preparedPayment.recipientPublicAddress,
-                paymentAmount: preparedPayment.paymentAmount,
-                feeAmount: preparedTransaction.feeAmount,
-                memoMessage: preparedPayment.memoMessage,
-                transaction: preparedTransaction.transaction,
-                receipt: preparedTransaction.receipt,
-                isOutgoingTransfer: preparedPayment.isOutgoingTransfer
-            )
-        }
+        // To initiate the outgoing payment, all we need to do is save
+        // the TSPaymentModel to the database. The PaymentsProcessor
+        // will observe this and take responsibility for the submission,
+        // verification and notification of the payment.
+        return try await self.upsertNewOutgoingPaymentModel(
+            recipientAci: preparedPayment.recipientAci,
+            recipientPublicAddress: preparedPayment.recipientPublicAddress,
+            paymentAmount: preparedPayment.paymentAmount,
+            feeAmount: preparedTransaction.feeAmount,
+            memoMessage: preparedPayment.memoMessage,
+            transaction: preparedTransaction.transaction,
+            receipt: preparedTransaction.receipt,
+            isOutgoingTransfer: preparedPayment.isOutgoingTransfer
+        )
     }
 
-    private func blockOnVerificationOfDefragmentation(paymentModels: [TSPaymentModel]) -> Promise<Void> {
+    private func blockOnVerificationOfDefragmentation(paymentModels: [TSPaymentModel]) async throws {
         let maxBlockInterval: TimeInterval = .second * 30
 
-        return firstly(on: DispatchQueue.global()) { () -> Promise<Void> in
-            let promises = paymentModels.map { paymentModel in
-                firstly(on: DispatchQueue.global()) { () -> Promise<Bool> in
-                    self.blockOnOutgoingVerification(paymentModel: paymentModel)
-                }.map(on: DispatchQueue.global()) { (didSucceed: Bool) -> Void in
-                    guard didSucceed else {
-                        throw PaymentsError.defragmentationFailed
+        do {
+            try await withCooperativeTimeout(seconds: maxBlockInterval) {
+                try await withThrowingTaskGroup { taskGroup in
+                    for paymentModel in paymentModels {
+                        taskGroup.addTask {
+                            guard try await self.blockOnOutgoingVerification(paymentModel: paymentModel) else {
+                                throw PaymentsError.defragmentationFailed
+                            }
+                        }
                     }
+                    try await taskGroup.waitForAll()
                 }
             }
-            return Promise.when(fulfilled: promises)
-        }.timeout(seconds: maxBlockInterval, description: "blockOnVerificationOfDefragmentation") { () -> Error in
-            PaymentsError.timeout
+        } catch is CooperativeTimeoutError {
+            throw PaymentsError.timeout
         }
     }
 
-    func blockOnOutgoingVerification(paymentModel: TSPaymentModel) -> Promise<Bool> {
-        Promise.wrapAsync {
-            while true {
-                let paymentModelLatest = SSKEnvironment.shared.databaseStorageRef.read { transaction in
-                    TSPaymentModel.anyFetch(uniqueId: paymentModel.uniqueId,
-                                            transaction: transaction)
-                }
-                guard let paymentModel = paymentModelLatest else {
-                    throw PaymentsError.missingModel
-                }
+    func blockOnOutgoingVerification(paymentModel: TSPaymentModel) async throws -> Bool {
+        while true {
+            let paymentModelLatest = SSKEnvironment.shared.databaseStorageRef.read { transaction in
+                TSPaymentModel.anyFetch(uniqueId: paymentModel.uniqueId, transaction: transaction)
+            }
+            guard let paymentModel = paymentModelLatest else {
+                throw PaymentsError.missingModel
+            }
 
-                switch paymentModel.paymentState {
-                case .outgoingUnsubmitted,
-                        .outgoingUnverified:
-                    // Not yet verified, wait then try again.
-                    try await Task.sleep(nanoseconds: 50_000_000)
-                    // loop by not returning
-                case .outgoingVerified,
-                        .outgoingSending,
-                        .outgoingSent,
-                        .outgoingComplete:
-                    // Success: Verified.
-                    return true
-                case .outgoingFailed:
-                    // Success: Failed.
-                    return false
-                case .incomingUnverified,
-                        .incomingVerified,
-                        .incomingComplete,
-                        .incomingFailed:
-                    owsFailDebug("Unexpected paymentState: \(paymentModel.descriptionForLogs)")
-                    throw PaymentsError.invalidModel
-                @unknown default:
-                    owsFailDebug("Invalid paymentState: \(paymentModel.descriptionForLogs)")
-                    throw PaymentsError.invalidModel
-                }
+            switch paymentModel.paymentState {
+            case .outgoingUnsubmitted,
+                    .outgoingUnverified:
+                // Not yet verified, wait then try again.
+                try await Task.sleep(nanoseconds: 50_000_000)
+                // loop by not returning
+            case .outgoingVerified,
+                    .outgoingSending,
+                    .outgoingSent,
+                    .outgoingComplete:
+                // Success: Verified.
+                return true
+            case .outgoingFailed:
+                // Success: Failed.
+                return false
+            case .incomingUnverified,
+                    .incomingVerified,
+                    .incomingComplete,
+                    .incomingFailed:
+                owsFailDebug("Unexpected paymentState: \(paymentModel.descriptionForLogs)")
+                throw PaymentsError.invalidModel
+            @unknown default:
+                owsFailDebug("Invalid paymentState: \(paymentModel.descriptionForLogs)")
+                throw PaymentsError.invalidModel
             }
         }
     }

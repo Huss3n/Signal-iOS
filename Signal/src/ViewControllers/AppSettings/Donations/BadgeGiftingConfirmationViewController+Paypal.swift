@@ -30,24 +30,22 @@ extension BadgeGiftingConfirmationViewController {
                     fromViewController: self
                 )
                 let preparedPayment = try await self.presentPaypal(with: approvalUrl, paymentId: paymentId)
-                let safetyNumberConfirmationResult = try await DonationViewsUtil.Gifts.showSafetyNumberConfirmationIfNecessary(for: self.thread).promise.awaitable()
-                switch safetyNumberConfirmationResult {
-                case .userDidNotConfirmSafetyNumberChange:
+                guard await DonationViewsUtil.Gifts.showSafetyNumberConfirmationIfNecessary(for: self.thread) else {
                     throw DonationViewsUtil.Gifts.SendGiftError.userCanceledBeforeChargeCompleted
-                case .userConfirmedSafetyNumberChangeOrNoChangeWasNeeded:
-                    break
                 }
                 mightHaveBeenCharged = true
                 try await DonationViewsUtil.wrapInProgressView(
                     from: self,
-                    operation: DonationViewsUtil.Gifts.startJob(
-                        amount: self.price,
-                        preparedPayment: preparedPayment,
-                        thread: self.thread,
-                        messageText: self.messageText,
-                        databaseStorage: SSKEnvironment.shared.databaseStorageRef,
-                        blockingManager: SSKEnvironment.shared.blockingManagerRef
-                    ).awaitable
+                    operation: {
+                        try await DonationViewsUtil.Gifts.startJob(
+                            amount: self.price,
+                            preparedPayment: preparedPayment,
+                            thread: self.thread,
+                            messageText: self.messageText,
+                            databaseStorage: SSKEnvironment.shared.databaseStorageRef,
+                            blockingManager: SSKEnvironment.shared.blockingManagerRef
+                        )
+                    }
                 )
 
                 Logger.info("[Gifting] Gifting PayPal donation finished")

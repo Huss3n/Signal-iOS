@@ -11,7 +11,9 @@ class GifPickerNavigationViewController: OWSNavigationController {
 
     weak var approvalDelegate: AttachmentApprovalViewControllerDelegate?
     weak var approvalDataSource: AttachmentApprovalViewControllerDataSource?
+
     private var initialMessageBody: MessageBody?
+    private let hasQuotedReplyDraft: Bool
 
     lazy var gifPickerViewController: GifPickerViewController = {
         let gifPickerViewController = GifPickerViewController()
@@ -19,8 +21,9 @@ class GifPickerNavigationViewController: OWSNavigationController {
         return gifPickerViewController
     }()
 
-    init(initialMessageBody: MessageBody?) {
+    init(initialMessageBody: MessageBody?, hasQuotedReplyDraft: Bool) {
         self.initialMessageBody = initialMessageBody
+        self.hasQuotedReplyDraft = hasQuotedReplyDraft
         super.init()
         pushViewController(gifPickerViewController, animated: false)
     }
@@ -31,7 +34,10 @@ extension GifPickerNavigationViewController: GifPickerViewControllerDelegate {
         AssertIsOnMainThread()
 
         let attachmentApprovalItem = AttachmentApprovalItem(attachment: attachment, canSave: false)
-        let attachmentApproval = AttachmentApprovalViewController(options: [], attachmentApprovalItems: [attachmentApprovalItem])
+        let attachmentApproval = AttachmentApprovalViewController(
+            options: self.hasQuotedReplyDraft ? [.disallowViewOnce] : [],
+            attachmentApprovalItems: [attachmentApprovalItem],
+        )
         attachmentApproval.setMessageBody(initialMessageBody, txProvider: DependenciesBridge.shared.db.readTxProvider)
         attachmentApproval.approvalDelegate = self
         attachmentApproval.approvalDataSource = self
@@ -108,8 +114,6 @@ class GifPickerViewController: OWSViewController, UISearchBarDelegate, UICollect
         }
     }
 
-    var lastQuery: String?
-
     public weak var delegate: GifPickerViewControllerDelegate?
 
     let searchBar: UISearchBar
@@ -128,7 +132,7 @@ class GifPickerViewController: OWSViewController, UISearchBarDelegate, UICollect
 
     private let kCellReuseIdentifier = "kCellReuseIdentifier"
 
-    var progressiveSearchTimer: Timer?
+    private let taskQueue = SerialTaskQueue()
 
     // MARK: Initializers
 
@@ -140,12 +144,6 @@ class GifPickerViewController: OWSViewController, UISearchBarDelegate, UICollect
         super.init()
 
         self.layout.delegate = self
-    }
-
-    deinit {
-        NotificationCenter.default.removeObserver(self)
-
-        progressiveSearchTimer?.invalidate()
     }
 
     // MARK: -
@@ -197,8 +195,9 @@ class GifPickerViewController: OWSViewController, UISearchBarDelegate, UICollect
                                                name: .OWSApplicationDidBecomeActive,
                                                object: nil)
 
-        // TODO: This really ought to be cancellable but it was not with promisekit so the refactor carries this for now.
-        Task { await loadTrending() }
+        taskQueue.enqueueCancellingPrevious(operation: { @MainActor in
+            await self.tryToSearch(afterDelay: 0)
+        })
     }
 
     var hasEverAppeared = false
@@ -214,8 +213,7 @@ class GifPickerViewController: OWSViewController, UISearchBarDelegate, UICollect
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
 
-        progressiveSearchTimer?.invalidate()
-        progressiveSearchTimer = nil
+        taskQueue.cancelAll()
 
         fileForCellTask?.cancel()
         fileForCellTask = nil
@@ -401,7 +399,7 @@ class GifPickerViewController: OWSViewController, UISearchBarDelegate, UICollect
         return imageInfos.count
     }
 
-    public  func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+    public func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: kCellReuseIdentifier, for: indexPath)
 
         guard indexPath.row < imageInfos.count else {
@@ -536,88 +534,53 @@ class GifPickerViewController: OWSViewController, UISearchBarDelegate, UICollect
         }
 
         // Do progressive search after a delay.
-        progressiveSearchTimer?.invalidate()
-        progressiveSearchTimer = nil
-        let kProgressiveSearchDelaySeconds = 1.0
-        progressiveSearchTimer = WeakTimer.scheduledTimer(timeInterval: kProgressiveSearchDelaySeconds, target: self, userInfo: nil, repeats: false) { [weak self] _ in
-            guard let strongSelf = self else {
-                return
-            }
-
-            strongSelf.tryToSearch()
-        }
+        let kProgressiveSearchDelay: TimeInterval = 1.0
+        taskQueue.enqueueCancellingPrevious(operation: { @MainActor in
+            await self.tryToSearch(afterDelay: kProgressiveSearchDelay)
+        })
     }
 
     public func searchBarSearchButtonClicked(_ searchBar: UISearchBar) {
         self.searchBar.resignFirstResponder()
 
-        tryToSearch()
+        taskQueue.enqueueCancellingPrevious(operation: { @MainActor in
+            await self.tryToSearch(afterDelay: 0)
+        })
     }
 
-    public func tryToSearch() {
-        progressiveSearchTimer?.invalidate()
-        progressiveSearchTimer = nil
+    private func tryToSearch(afterDelay delay: TimeInterval) async {
+        let query = searchBar.text!.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        guard let text = searchBar.text else {
-            OWSActionSheets.showErrorAlert(message: OWSLocalizedString("GIF_PICKER_VIEW_MISSING_QUERY",
-                                                           comment: "Alert message shown when user tries to search for GIFs without entering any search terms."))
-            return
-        }
-
-        let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if (viewMode == .searching || viewMode == .results) && lastQuery == query {
-            return
-        }
-
-        // TODO: This really ought to be cancellable but it was not with promisekit so the refactor carries this for now.
-        Task { await search(query: query) }
-    }
-
-    private func loadTrending() async {
-        assert(progressiveSearchTimer == nil)
-        assert(lastQuery == nil)
-        assert(searchBar.text.isEmptyOrNil)
-
-        do {
-            let imageInfos = try await GiphyAPI.trending()
-
-            guard self.lastQuery == nil else {
-                Logger.info("not showing trending results due to subsequent searches.")
-                return
-            }
-
-            Logger.info("showing trending")
-            if imageInfos.count > 0 {
-                self.imageInfos = imageInfos
-                self.viewMode = .results
+        await loadResults(afterDelay: delay) {
+            if query.isEmpty {
+                return try await GiphyAPI.trending()
             } else {
-                owsFailDebug("trending results was unexpectedly empty")
+                return try await GiphyAPI.search(query: query)
             }
-        } catch {
-            // Don't both showing error UI feedback for default "trending" results.
-            Logger.error("error: \(error)")
         }
     }
 
-    private func search(query: String) async {
-        imageInfos = []
-        viewMode = .searching
-        lastQuery = query
-        self.collectionView.contentOffset = CGPoint.zero
+    private func showLoading() {
+        self.imageInfos = []
+        self.viewMode = .searching
+    }
 
+    private func loadResults(afterDelay delay: TimeInterval, loadImageInfos: () async throws -> [GiphyImageInfo]) async {
+        self.showLoading()
+        self.collectionView.contentOffset = .zero
         do {
-            imageInfos = try await GiphyAPI.search(query: query)
-            Logger.info("search complete")
-            if imageInfos.count > 0 {
-                viewMode = .results
-            } else {
-                viewMode = .noResults
+            if delay > 0 {
+                try await Task.sleep(nanoseconds: delay.clampedNanoseconds)
             }
+            let imageInfos = try await loadImageInfos()
+            try Task.checkCancellation()
+            self.imageInfos = imageInfos
+            self.viewMode = imageInfos.isEmpty ? .noResults : .results
+            Logger.info("Finished loading GIFs")
+        } catch is CancellationError, URLError.cancelled {
+            // Do nothing.
         } catch {
             owsFailDebugUnlessNetworkFailure(error)
-
-            Logger.warn("search failed.")
             // TODO: Present this error to the user.
             viewMode = .error
         }
@@ -639,7 +602,9 @@ class GifPickerViewController: OWSViewController, UISearchBarDelegate, UICollect
         guard viewMode == .error else {
             return
         }
-        tryToSearch()
+        taskQueue.enqueueCancellingPrevious(operation: { @MainActor in
+            await self.tryToSearch(afterDelay: 0)
+        })
     }
 
     public override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {

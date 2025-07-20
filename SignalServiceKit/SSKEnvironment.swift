@@ -241,23 +241,69 @@ public class SSKEnvironment: NSObject {
     /// This may be called multiple times within a single process.
     ///
     /// Re-warming helps ensure the NSE sees the same state as the Main App.
-    public func warmCaches(appReadiness: AppReadiness) {
+    @MainActor
+    public func warmCaches(appReadiness: AppReadiness, dependenciesBridge: DependenciesBridge) {
         // Note: All of these methods must be safe to invoke repeatedly.
 
-        DependenciesBridge.shared.tsAccountManager.warmCaches()
-        fixLocalRecipientIfNeeded()
+        dependenciesBridge.tsAccountManager.warmCaches()
+        let remoteConfig = self.remoteConfigManagerRef.warmCaches()
+        self.verifyPniAndPniIdentityKey(
+            dependenciesBridge: dependenciesBridge,
+            remoteConfig: remoteConfig,
+        )
+        self.fixLocalRecipientIfNeeded(dependenciesBridge: dependenciesBridge)
         SignalProxy.warmCaches(appReadiness: appReadiness)
-        SSKEnvironment.shared.signalServiceRef.warmCaches()
-        SSKEnvironment.shared.remoteConfigManagerRef.warmCaches()
-        SSKEnvironment.shared.profileManagerRef.warmCaches()
-        SSKEnvironment.shared.receiptManagerRef.prepareCachedValues()
-        DependenciesBridge.shared.svr.warmCaches()
-        SSKEnvironment.shared.typingIndicatorsRef.warmCaches()
-        SSKEnvironment.shared.paymentsHelperRef.warmCaches()
-        SSKEnvironment.shared.paymentsCurrenciesRef.warmCaches()
+        self.signalServiceRef.warmCaches()
+        self.profileManagerRef.warmCaches()
+        self.receiptManagerRef.prepareCachedValues()
+        dependenciesBridge.svr.warmCaches()
+        self.typingIndicatorsRef.warmCaches()
+        self.paymentsHelperRef.warmCaches()
+        self.paymentsCurrenciesRef.warmCaches()
         StoryManager.setup(appReadiness: appReadiness)
         DonationSubscriptionManager.warmCaches()
-        DependenciesBridge.shared.db.read { tx in appExpiryRef.warmCaches(with: tx) }
+        dependenciesBridge.db.read { tx in appExpiryRef.warmCaches(with: tx) }
+    }
+
+    @MainActor
+    private func verifyPniAndPniIdentityKey(dependenciesBridge: DependenciesBridge, remoteConfig: RemoteConfig) {
+        let databaseStorage = self.databaseStorageRef
+        let tsAccountManager = dependenciesBridge.tsAccountManager
+
+        guard remoteConfig.shouldVerifyPniAndPniIdentityKeyExist else {
+            return
+        }
+
+        let mustHavePni: Bool
+        let mustHavePniIdentityKey: Bool
+        switch tsAccountManager.registrationStateWithMaybeSneakyTransaction {
+        case .provisioned:
+            mustHavePni = true
+            mustHavePniIdentityKey = true
+        case .registered:
+            mustHavePni = true
+            mustHavePniIdentityKey = true
+        default:
+            mustHavePni = false
+            mustHavePniIdentityKey = false
+        }
+
+        guard mustHavePni || mustHavePniIdentityKey else {
+            return
+        }
+
+        let (hasPni, hasPniIdentityKey) = databaseStorage.read { tx -> (Bool, Bool) in
+            let hasPni = tsAccountManager.localIdentifiers(tx: tx)!.pni != nil
+            let hasPniIdentityKey = dependenciesBridge.identityManager.identityKeyPair(for: .pni, tx: tx) != nil
+            return (hasPni, hasPniIdentityKey)
+        }
+
+        if (!hasPni && mustHavePni) || (!hasPniIdentityKey && mustHavePniIdentityKey) {
+            Logger.warn("Deregistering because PNI state is missing (hasPni: \(hasPni); hasPniIdentityKey: \(hasPniIdentityKey))")
+            databaseStorage.write { tx in
+                dependenciesBridge.registrationStateChangeManager.setIsDeregisteredOrDelinked(true, tx: tx)
+            }
+        }
     }
 
     /// Ensures the local SignalRecipient is correct.
@@ -265,15 +311,15 @@ public class SSKEnvironment: NSObject {
     /// This primarily serves to ensure the local SignalRecipient has its own
     /// Pni (a one-time migration), but it also helps ensure that the value is
     /// always consistent with TSAccountManager's values.
-    private func fixLocalRecipientIfNeeded() {
-        SSKEnvironment.shared.databaseStorageRef.write { tx in
-            guard let localIdentifiers = DependenciesBridge.shared.tsAccountManager.localIdentifiers(tx: tx) else {
+    private func fixLocalRecipientIfNeeded(dependenciesBridge: DependenciesBridge) {
+        self.databaseStorageRef.write { tx in
+            guard let localIdentifiers = dependenciesBridge.tsAccountManager.localIdentifiers(tx: tx) else {
                 return  // Not registered yet.
             }
             guard let phoneNumber = E164(localIdentifiers.phoneNumber) else {
                 return  // Registered with an invalid phone number.
             }
-            let recipientMerger = DependenciesBridge.shared.recipientMerger
+            let recipientMerger = dependenciesBridge.recipientMerger
             _ = recipientMerger.applyMergeForLocalAccount(
                 aci: localIdentifiers.aci,
                 phoneNumber: phoneNumber,

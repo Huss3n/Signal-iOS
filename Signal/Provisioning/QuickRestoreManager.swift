@@ -76,8 +76,8 @@ public class QuickRestoreManager {
 
             let backupTier: RegistrationProvisioningMessage.BackupTier? = switch backupSettingsStore.backupPlan(tx: tx) {
             case .free: .free
-            case .paid, .paidExpiringSoon: .paid
-            case .disabled: nil
+            case .paid, .paidExpiringSoon, .paidAsTester: .paid
+            case .disabled, .disabling: nil
             }
 
             let lastBackupTime = backupSettingsStore.lastBackupDate(tx: tx)?.ows_millisecondsSince1970
@@ -111,6 +111,7 @@ public class QuickRestoreManager {
             phoneNumber: myPhoneNumber,
             pin: pinCode,
             tier: backupTier,
+            backupVersion: BackupArchiveManagerImpl.Constants.supportedBackupVersion,
             backupTimestamp: lastBackupDate,
             backupSizeBytes: lastBackupSizeBytes,
             restoreMethodToken: restoreMethodToken

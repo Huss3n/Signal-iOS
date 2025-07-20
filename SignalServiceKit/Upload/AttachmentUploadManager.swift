@@ -143,8 +143,23 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
     private let sleepTimer: Upload.Shims.SleepTimer
     private let storyStore: StoryStore
 
+    private struct ActiveUploadKey: Hashable {
+        let attachmentId: Attachment.IDType
+        let isThumbnailUpload: Bool
+
+        init(attachmentId: Attachment.IDType, uploadType: UploadType) {
+            self.attachmentId = attachmentId
+            switch uploadType {
+            case .transitTier:
+                self.isThumbnailUpload = false
+            case .mediaTier(_, let isThumbnail):
+                self.isThumbnailUpload = isThumbnail
+            }
+        }
+    }
+
     // Map of active upload tasks.
-    private var activeUploads = [Attachment.IDType: Task<(AttachmentUploadRecord, Upload.AttachmentResult), Error>]()
+    private var activeUploads = [ActiveUploadKey: Task<(AttachmentUploadRecord, Upload.AttachmentResult), Error>]()
 
     private enum UploadType {
         case transitTier
@@ -419,7 +434,6 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
             cdnNumber =  try await self.copyToMediaTier(
                 localAci: localAci,
                 mediaName: mediaName,
-                encryptionType: .attachment,
                 uploadEra: uploadEra,
                 result: result,
                 logger: logger
@@ -434,8 +448,13 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
                     // We reused a transit tier upload but the source couldn't be found.
                     // That transit tier upload is now invalid.
                     try await db.awaitableWrite { tx in
+                        // Refetch the attachment
+                        guard let attachment = attachmentStore.fetch(id: attachmentStream.id, tx: tx) else {
+                            return
+                        }
+
                         try self.attachmentUploadStore.markTransitTierUploadExpired(
-                            attachment: attachmentStream.attachment,
+                            attachment: attachment,
                             info: transitTierInfo,
                             tx: tx
                         )
@@ -450,6 +469,10 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
         }
 
         try await db.awaitableWrite { tx in
+            // Refetch the attachment to ensure other fields are up-to-date.
+            guard let attachmentStream = attachmentStore.fetch(id: attachmentStream.id, tx: tx)?.asStream() else {
+                return
+            }
 
             let mediaTierInfo = Attachment.MediaTierInfo(
                 cdnNumber: cdnNumber,
@@ -503,13 +526,16 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
         let cdnNumber =  try await self.copyToMediaTier(
             localAci: localAci,
             mediaName: AttachmentBackupThumbnail.thumbnailMediaName(fullsizeMediaName: mediaName),
-            encryptionType: .thumbnail,
             uploadEra: uploadEra,
             result: result,
             logger: logger
         )
 
         try await db.awaitableWrite { tx in
+            // Refetch the attachment to ensure other fields are up-to-date.
+            guard let attachmentStream = attachmentStore.fetch(id: attachmentStream.id, tx: tx)?.asStream() else {
+                return
+            }
 
             let thumbnailInfo = Attachment.ThumbnailMediaTierInfo(
                 cdnNumber: cdnNumber,
@@ -545,8 +571,9 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
         progress: OWSProgressSink?
     ) async throws -> (record: AttachmentUploadRecord, result: Upload.AttachmentResult) {
 
-        if let activeUpload = activeUploads[attachmentId] {
-            // If this fails, it means the internal retry logic has given up, so don't 
+        let activeUploadKey = ActiveUploadKey(attachmentId: attachmentId, uploadType: type)
+        if let activeUpload = activeUploads[activeUploadKey] {
+            // If this fails, it means the internal retry logic has given up, so don't
             // attempt any retries here
             do {
                 return try await activeUpload.value
@@ -567,7 +594,7 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
         let uploadTask = Task {
             defer {
                 // Clear out the active upload task once it finishes running.
-                activeUploads[attachmentId] = nil
+                activeUploads[activeUploadKey] = nil
             }
 
             // This task will only fail if a non-recoverable error is encountered, or the
@@ -580,8 +607,8 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
             )
         }
 
-        // Add the active task to allow any additional uploads to ta
-        activeUploads[attachmentId] = uploadTask
+        // Add the active task to allow any additional scheduled uploads to reuse the same upload
+        activeUploads[activeUploadKey] = uploadTask
         return try await uploadTask.value
     }
 
@@ -855,8 +882,8 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
             let fileUrl = fileSystem.temporaryFileUrl()
             let encryptionKey = try db.read { tx in
                 try backupKeyMaterial.mediaEncryptionMetadata(
-                    mediaName: mediaName,
-                    type: .thumbnail,
+                    mediaName: AttachmentBackupThumbnail.thumbnailMediaName(fullsizeMediaName: mediaName),
+                    type: .transitTierThumbnail,
                     tx: tx
                 )
             }
@@ -1014,7 +1041,6 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
     public func copyToMediaTier(
         localAci: Aci,
         mediaName: String,
-        encryptionType: MediaTierEncryptionType,
         uploadEra: String,
         result: Upload.AttachmentResult,
         logger: PrefixedLogger
@@ -1027,7 +1053,7 @@ public actor AttachmentUploadManagerImpl: AttachmentUploadManager {
         let mediaEncryptionMetadata = try db.read { tx in
             try backupKeyMaterial.mediaEncryptionMetadata(
                 mediaName: mediaName,
-                type: encryptionType,
+                type: .outerLayerFullsizeOrThumbnail,
                 tx: tx
             )
         }

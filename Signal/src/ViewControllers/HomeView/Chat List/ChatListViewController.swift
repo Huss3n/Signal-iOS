@@ -23,7 +23,7 @@ public class ChatListViewController: OWSViewController, HomeTabViewController {
         tableDataSource.viewController = self
         loadCoordinator.viewController = self
         reminderViews.chatListViewController = self
-        viewState.backupProgressView.chatListViewController = self
+        viewState.backupDownloadProgressView.chatListViewController = self
         viewState.settingsButtonCreator.delegate = self
         viewState.proxyButtonCreator.delegate = self
         viewState.configure()
@@ -97,9 +97,9 @@ public class ChatListViewController: OWSViewController, HomeTabViewController {
         applyTheme()
         observeNotifications()
         DependenciesBridge.shared.db.read { tx in
-            self.viewState.backupProgressViewState.refetchDBState(tx: tx)
+            self.viewState.backupDownloadProgressViewState.refetchDBState(tx: tx)
         }
-        self.viewState.backupProgressView.update(viewState: self.viewState.backupProgressViewState)
+        self.viewState.backupDownloadProgressView.update(viewState: self.viewState.backupDownloadProgressViewState)
     }
 
     public override func viewWillAppear(_ animated: Bool) {
@@ -199,6 +199,10 @@ public class ChatListViewController: OWSViewController, HomeTabViewController {
 
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+
+        if #available(iOS 26, *), !UIDevice.current.isIPad {
+            (tabBarController as? HomeTabBarController)?.setTabBarHidden(false, animated: false)
+        }
 
         appReadiness.setUIIsReady()
 

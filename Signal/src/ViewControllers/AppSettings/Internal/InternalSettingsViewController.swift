@@ -4,14 +4,26 @@
 //
 
 import AVFoundation
+import GRDB
 import SignalServiceKit
 import SignalUI
 
 class InternalSettingsViewController: OWSTableViewController2 {
 
+    enum Mode: Equatable {
+        case registration
+        case standard
+    }
+
+    private let mode: Mode
+
     private let appReadiness: AppReadinessSetter
 
-    init(appReadiness: AppReadinessSetter) {
+    init(
+        mode: Mode = .standard,
+        appReadiness: AppReadinessSetter
+    ) {
+        self.mode = mode
         self.appReadiness = appReadiness
         super.init()
     }
@@ -106,21 +118,65 @@ class InternalSettingsViewController: OWSTableViewController2 {
             }
         ))
 
-        debugSection.add(.actionItem(withText: "Validate Message Backup") {
-            self.validateMessageBackupProto()
-        })
-
-        debugSection.add(.actionItem(withText: "Export Message Backup proto") {
-            self.exportMessageBackupProto()
-        })
+        if mode == .registration {
+            debugSection.add(.actionItem(withText: "Submit debug logs") {
+                DebugLogs.submitLogs(supportTag: "Registration", dumper: .fromGlobals())
+            })
+        }
 
         contents.add(debugSection)
+
+        let backupsSection = OWSTableSection(title: "Backups")
+
+        if mode != .registration {
+            backupsSection.add(.actionItem(withText: "Validate Message Backup") {
+                self.validateMessageBackupProto()
+            })
+
+            backupsSection.add(.actionItem(withText: "Export Message Backup proto") {
+                self.exportMessageBackupProto()
+            })
+        }
+
+        backupsSection.add(.switch(
+            withText: "Offload all attachments",
+            subtitle: "If on and \"Optimize Storage\" enabled, offload all attachments instead of only those >30d old",
+            isOn: { Attachment.offloadingThresholdOverride },
+            actionBlock: { _ in
+                Attachment.offloadingThresholdOverride = !Attachment.offloadingThresholdOverride
+            }
+        ))
+        backupsSection.add(.switch(
+            withText: "Disable transit tier downloads",
+            subtitle: "Only download backed-up media, never last 45 days free tier media",
+            isOn: { BackupAttachmentDownloadEligibility.disableTransitTierDownloadsOverride },
+            actionBlock: { _ in
+                BackupAttachmentDownloadEligibility.disableTransitTierDownloadsOverride =
+                    !BackupAttachmentDownloadEligibility.disableTransitTierDownloadsOverride
+            }
+        ))
+        backupsSection.add(.actionItem(withText: "Acquire Backup entitlement sans StoreKit") { [weak self] in
+            Task {
+                let backupTestFlightEntitlementManager = DependenciesBridge.shared.backupTestFlightEntitlementManager
+
+                do {
+                    try await backupTestFlightEntitlementManager.acquireEntitlement()
+                    self?.presentToast(text: "Successfully acquired Backup entitlement!")
+                } catch {
+                    self?.presentToast(text: "Failed to acquired Backup entitlement! \(error)")
+                }
+            }
+        })
+
+        if backupsSection.items.isEmpty.negated {
+            contents.add(backupsSection)
+        }
 
         let (
             contactThreadCount,
             groupThreadCount,
             messageCount,
-            v2AttachmentCount,
+            attachmentCount,
             donationSubscriberID,
             storageServiceManifestVersion
         ) = SSKEnvironment.shared.databaseStorageRef.read { tx in
@@ -164,16 +220,23 @@ class InternalSettingsViewController: OWSTableViewController2 {
         numberFormatter.formatterBehavior = .behavior10_4
         numberFormatter.numberStyle = .decimal
 
-        let byteCountFormatter = ByteCountFormatter()
-
         let dbSection = OWSTableSection(title: "Database")
-        dbSection.add(.copyableItem(label: "DB Size", value: byteCountFormatter.string(for: SSKEnvironment.shared.databaseStorageRef.databaseFileSize)))
-        dbSection.add(.copyableItem(label: "DB WAL Size", value: byteCountFormatter.string(for: SSKEnvironment.shared.databaseStorageRef.databaseWALFileSize)))
-        dbSection.add(.copyableItem(label: "DB SHM Size", value: byteCountFormatter.string(for: SSKEnvironment.shared.databaseStorageRef.databaseSHMFileSize)))
         dbSection.add(.copyableItem(label: "Contact Threads", value: numberFormatter.string(for: contactThreadCount)))
         dbSection.add(.copyableItem(label: "Group Threads", value: numberFormatter.string(for: groupThreadCount)))
         dbSection.add(.copyableItem(label: "Messages", value: numberFormatter.string(for: messageCount)))
-        dbSection.add(.copyableItem(label: "v2 Attachments", value: numberFormatter.string(for: v2AttachmentCount)))
+        dbSection.add(.copyableItem(label: "Attachments", value: numberFormatter.string(for: attachmentCount)))
+        dbSection.add(.actionItem(
+            withText: "Disk Usage",
+            actionBlock: { [weak self] in
+                ModalActivityIndicatorViewController.present(
+                    fromViewController: self!,
+                    asyncBlock: { [weak self] modal in
+                        let vc = await InternalDiskUsageViewController.build()
+                        self?.navigationController?.pushViewController(vc, animated: true)
+                        modal.dismiss(animated: true)
+                    })
+            }
+        ))
         contents.add(dbSection)
 
         let deviceSection = OWSTableSection(title: "Device")
@@ -199,19 +262,21 @@ class InternalSettingsViewController: OWSTableViewController2 {
             selector: #selector(spinCheckmarks(_:))))
         contents.add(otherSection)
 
-        let paymentsSection = OWSTableSection(title: "Payments")
-        paymentsSection.add(.copyableItem(label: "MobileCoin Environment", value: MobileCoinAPI.Environment.current.description))
-        paymentsSection.add(.copyableItem(label: "Enabled?", value: SSKEnvironment.shared.paymentsHelperRef.arePaymentsEnabled ? "Yes" : "No"))
-        if SSKEnvironment.shared.paymentsHelperRef.arePaymentsEnabled, let paymentsEntropy = SUIEnvironment.shared.paymentsSwiftRef.paymentsEntropy {
-            paymentsSection.add(.copyableItem(label: "Entropy", value: paymentsEntropy.hexadecimalString))
-            if let passphrase = SUIEnvironment.shared.paymentsSwiftRef.passphrase {
-                paymentsSection.add(.copyableItem(label: "Mnemonic", value: passphrase.asPassphrase))
+        if mode != .registration {
+            let paymentsSection = OWSTableSection(title: "Payments")
+            paymentsSection.add(.copyableItem(label: "MobileCoin Environment", value: MobileCoinAPI.Environment.current.description))
+            paymentsSection.add(.copyableItem(label: "Enabled?", value: SSKEnvironment.shared.paymentsHelperRef.arePaymentsEnabled ? "Yes" : "No"))
+            if SSKEnvironment.shared.paymentsHelperRef.arePaymentsEnabled, let paymentsEntropy = SUIEnvironment.shared.paymentsSwiftRef.paymentsEntropy {
+                paymentsSection.add(.copyableItem(label: "Entropy", value: paymentsEntropy.hexadecimalString))
+                if let passphrase = SUIEnvironment.shared.paymentsSwiftRef.passphrase {
+                    paymentsSection.add(.copyableItem(label: "Mnemonic", value: passphrase.asPassphrase))
+                }
+                if let walletAddressBase58 = SUIEnvironment.shared.paymentsSwiftRef.walletAddressBase58() {
+                    paymentsSection.add(.copyableItem(label: "B58", value: walletAddressBase58))
+                }
             }
-            if let walletAddressBase58 = SUIEnvironment.shared.paymentsSwiftRef.walletAddressBase58() {
-                paymentsSection.add(.copyableItem(label: "B58", value: walletAddressBase58))
-            }
+            contents.add(paymentsSection)
         }
-        contents.add(paymentsSection)
 
         self.contents = contents
     }
@@ -428,8 +493,8 @@ private extension InternalSettingsViewController {
         _ = try await backupArchiveManager.uploadEncryptedBackup(
             metadata: metadata,
             registeredBackupIDToken: registeredBackupIDToken,
-            localIdentifiers: localIdentifiers,
-            auth: .implicit()
+            auth: .implicit(),
+            progress: nil,
         )
     }
 }

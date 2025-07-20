@@ -616,11 +616,11 @@ public class GroupManager: NSObject {
 
     // MARK: - Removed from Group or Invite Revoked
 
-    public static func handleNotInGroup(groupId: Data) async {
+    public static func handleNotInGroup(groupId: GroupIdentifier) async {
         let databaseStorage = SSKEnvironment.shared.databaseStorageRef
 
         do {
-            let groupThread = databaseStorage.read { tx in TSGroupThread.fetch(groupId: groupId, transaction: tx) }
+            let groupThread = databaseStorage.read { tx in TSGroupThread.fetch(forGroupId: groupId, tx: tx) }
             guard let groupThread else {
                 // We may be be trying to restore a group from storage service
                 // that we are no longer a member of.
@@ -663,7 +663,7 @@ public class GroupManager: NSObject {
                 owsFailDebug("Missing localIdentifiers.")
                 return
             }
-            guard let groupThread = TSGroupThread.fetch(groupId: groupId, transaction: tx) else {
+            guard let groupThread = TSGroupThread.fetch(forGroupId: groupId, tx: tx) else {
                 owsFailDebug("Couldn't fetch thread that's guaranteed to exist.")
                 return
             }
@@ -1225,6 +1225,8 @@ public class GroupManager: NSObject {
         )
     }
 
+    private static let localProfileCommitmentQueue = ConcurrentTaskQueue(concurrentLimit: 1)
+
     /// Ensure that we have a profile key commitment for our local profile
     /// available on the service.
     ///
@@ -1233,6 +1235,12 @@ public class GroupManager: NSObject {
     /// our profile key credential from the service until we've uploaded a profile
     /// key commitment to the service.
     public static func ensureLocalProfileHasCommitmentIfNecessary() async throws {
+        try await localProfileCommitmentQueue.run {
+            try await _ensureLocalProfileHasCommitmentIfNecessary()
+        }
+    }
+
+    private static func _ensureLocalProfileHasCommitmentIfNecessary() async throws {
         let accountManager = DependenciesBridge.shared.tsAccountManager
 
         func hasProfileKeyCredential() throws -> Bool {

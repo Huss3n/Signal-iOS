@@ -91,8 +91,9 @@ class _AttachmentUploadManager_ChatConnectionManagerMock: ChatConnectionManager 
     var hasEmptiedInitialQueue: Bool { true }
     var identifiedConnectionState: OWSChatConnectionState { .open }
     func waitForIdentifiedConnectionToOpen() async throws { }
-    func waitUntilIdentifiedConnectionShouldBeClosed() async throws { fatalError() }
+    func waitUntilIdentifiedConnectionShouldBeClosed() async throws(CancellationError) { fatalError() }
     func shouldWaitForSocketToMakeRequest(connectionType: OWSChatConnectionType) -> Bool { true }
+    func shouldSocketBeOpen_restOnly(connectionType: OWSChatConnectionType) -> Bool { fatalError() }
     func requestConnections(shouldReconnectIfConnectedElsewhere: Bool) -> [OWSChatConnection.ConnectionToken] { [] }
     func makeRequest(_ request: TSRequest) async throws -> HTTPResponse { fatalError() }
     func waitForDisconnectIfClosed() async {}

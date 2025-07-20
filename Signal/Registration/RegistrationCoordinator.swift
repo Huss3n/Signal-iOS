@@ -154,12 +154,19 @@ public protocol RegistrationCoordinator {
     /// registration process, exiting back to the main app.
     func acknowledgeReglockTimeout() -> AcknowledgeReglockResult
 
+    /// Reset the chosen restore path - This is the path selected from the splash that decides
+    /// between regular registration, quick restore and manual restore.
+    func resetRestoreMode() -> Guarantee<RegistrationStep>
+
     /// Clear out the chosen restore method.  This will result in the user being sent back
     /// to the UI to choose a new restore method. 
     func resetRestoreMethodChoice() -> Guarantee<RegistrationStep>
 
     /// Additional step to have the user confirm restoring from backup.
     func confirmRestoreFromBackup() -> Guarantee<RegistrationStep>
+
+    /// Cancel from the backup entry screen and clear out any key that has been entered.
+    func cancelBackupKeyEntry() -> Guarantee<RegistrationStep>
 }
 
 public enum AcknowledgeReglockResult {

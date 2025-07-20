@@ -41,6 +41,8 @@ CREATE
             ,"addresses" BLOB
             ,"storyViewMode" INTEGER DEFAULT 0
             ,"editTargetTimestamp" INTEGER
+            ,"lastDraftInteractionRowId" INTEGER DEFAULT 0
+            ,"lastDraftUpdateTimestamp" INTEGER DEFAULT 0
         )
 ;
 
@@ -2358,5 +2360,21 @@ CREATE
     INDEX "index_BackupAttachmentDownloadQueue_on_state_estimatedByteCount"
         ON "BackupAttachmentDownloadQueue"("state"
     ,"estimatedByteCount"
+)
+;
+
+CREATE
+    TABLE
+        IF NOT EXISTS "ListedBackupMediaObject" (
+            "id" INTEGER PRIMARY KEY AUTOINCREMENT
+            ,"mediaId" BLOB NOT NULL
+            ,"cdnNumber" INTEGER NOT NULL
+            ,"objectLength" INTEGER NOT NULL
+        )
+;
+
+CREATE
+    INDEX "index_ListedBackupMediaObject_on_mediaId"
+        ON "ListedBackupMediaObject"("mediaId"
 )
 ;

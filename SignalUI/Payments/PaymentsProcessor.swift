@@ -631,8 +631,8 @@ private class PaymentProcessingOperation {
         }
 
         do {
-            let mobileCoinAPI = try await SUIEnvironment.shared.paymentsImplRef.getMobileCoinAPI().awaitable()
-            _ = try await mobileCoinAPI.submitTransaction(transaction: transaction).awaitable()
+            let mobileCoinAPI = try await SUIEnvironment.shared.paymentsImplRef.getMobileCoinAPI()
+            _ = try await mobileCoinAPI.submitTransaction(transaction: transaction)
             try await Self.updatePaymentStatePromise(paymentModel: paymentModel, fromState: .outgoingUnsubmitted, toState: .outgoingUnverified)
         } catch PaymentsError.inputsAlreadySpent {
             // e.g. if we double-submit a transaction, it should become unverified,
@@ -655,7 +655,7 @@ private class PaymentProcessingOperation {
             return
         }
 
-        let mobileCoinAPI = try await SUIEnvironment.shared.paymentsImplRef.getMobileCoinAPI().awaitable()
+        let mobileCoinAPI = try await SUIEnvironment.shared.paymentsImplRef.getMobileCoinAPI()
 
         guard
             let mcTransactionData = paymentModel.mcTransactionData,
@@ -666,7 +666,7 @@ private class PaymentProcessingOperation {
             throw PaymentsError.indeterminateState
         }
 
-        let transactionStatus = try await mobileCoinAPI.getOutgoingTransactionStatus(transaction: transaction).awaitable()
+        let transactionStatus = try await mobileCoinAPI.getOutgoingTransactionStatus(transaction: transaction)
 
         try await SSKEnvironment.shared.databaseStorageRef.awaitableWrite { transaction in
             switch transactionStatus.transactionStatus {
@@ -746,7 +746,7 @@ private class PaymentProcessingOperation {
     private func verifyIncomingPayment(paymentModel: TSPaymentModel) async throws {
         owsAssertDebug(paymentModel.paymentState == .incomingUnverified)
 
-        let mobileCoinAPI = try await SUIEnvironment.shared.paymentsImplRef.getMobileCoinAPI().awaitable()
+        let mobileCoinAPI = try await SUIEnvironment.shared.paymentsImplRef.getMobileCoinAPI()
 
         guard let mcReceiptData = paymentModel.mcReceiptData, let receipt = MobileCoin.Receipt(serializedData: mcReceiptData) else {
             await Self.handleIndeterminatePayment(paymentModel: paymentModel)

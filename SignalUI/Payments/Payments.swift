@@ -39,10 +39,9 @@ public protocol PaymentsSwift: Payments {
 
     var currentPaymentBalance: PaymentBalance? { get }
     func updateCurrentPaymentBalance()
-    func updateCurrentPaymentBalancePromise() -> Promise<TSPaymentAmount>
     func clearCurrentPaymentBalance()
 
-    func getEstimatedFee(forPaymentAmount paymentAmount: TSPaymentAmount) -> Promise<TSPaymentAmount>
+    func getEstimatedFee(forPaymentAmount paymentAmount: TSPaymentAmount) async throws -> TSPaymentAmount
 
     func prepareOutgoingPayment(
         recipient: SendPaymentRecipient,
@@ -50,9 +49,9 @@ public protocol PaymentsSwift: Payments {
         memoMessage: String?,
         isOutgoingTransfer: Bool,
         canDefragment: Bool
-    ) -> Promise<PreparedPayment>
+    ) async throws -> PreparedPayment
 
-    func initiateOutgoingPayment(preparedPayment: PreparedPayment) -> Promise<TSPaymentModel>
+    func initiateOutgoingPayment(preparedPayment: PreparedPayment) async throws -> TSPaymentModel
 
     func maximumPaymentAmount() async throws -> TSPaymentAmount
 
@@ -64,7 +63,7 @@ public protocol PaymentsSwift: Payments {
 
     func isValidPassphraseWord(_ word: String?) -> Bool
 
-    func blockOnOutgoingVerification(paymentModel: TSPaymentModel) -> Promise<Bool>
+    func blockOnOutgoingVerification(paymentModel: TSPaymentModel) async throws -> Bool
 }
 
 // MARK: -
@@ -156,15 +155,11 @@ extension MockPayments: PaymentsSwift {
         owsFail("Not implemented.")
     }
 
-    public func updateCurrentPaymentBalancePromise() -> Promise<TSPaymentAmount> {
-        owsFail("Not implemented.")
-    }
-
     public func clearCurrentPaymentBalance() {
         owsFail("Not implemented.")
     }
 
-    public func getEstimatedFee(forPaymentAmount paymentAmount: TSPaymentAmount) -> Promise<TSPaymentAmount> {
+    public func getEstimatedFee(forPaymentAmount paymentAmount: TSPaymentAmount) async throws -> TSPaymentAmount {
         owsFail("Not implemented.")
     }
 
@@ -174,11 +169,11 @@ extension MockPayments: PaymentsSwift {
         memoMessage: String?,
         isOutgoingTransfer: Bool,
         canDefragment: Bool
-    ) -> Promise<PreparedPayment> {
+    ) async throws -> PreparedPayment {
         owsFail("Not implemented.")
     }
 
-    public func initiateOutgoingPayment(preparedPayment: PreparedPayment) -> Promise<TSPaymentModel> {
+    public func initiateOutgoingPayment(preparedPayment: PreparedPayment) async throws -> TSPaymentModel {
         owsFail("Not implemented.")
     }
 
@@ -223,7 +218,7 @@ extension MockPayments: PaymentsSwift {
         owsFail("Not implemented.")
     }
 
-    public func blockOnOutgoingVerification(paymentModel: TSPaymentModel) -> Promise<Bool> {
+    public func blockOnOutgoingVerification(paymentModel: TSPaymentModel) async throws -> Bool {
         owsFail("Not implemented.")
     }
 }

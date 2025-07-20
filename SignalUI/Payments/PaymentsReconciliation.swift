@@ -71,8 +71,8 @@ public class PaymentsReconciliation {
         guard shouldReconcile(appReadiness: appReadiness) else {
             return
         }
-        let mobileCoinAPI = try await SUIEnvironment.shared.paymentsImplRef.getMobileCoinAPI().awaitable()
-        let accountActivity = try await mobileCoinAPI.getAccountActivity().awaitable()
+        let mobileCoinAPI = try await SUIEnvironment.shared.paymentsImplRef.getMobileCoinAPI()
+        let accountActivity = try await mobileCoinAPI.getAccountActivity()
         await Self.reconcileIfNecessary(transactionHistory: accountActivity)
     }
 

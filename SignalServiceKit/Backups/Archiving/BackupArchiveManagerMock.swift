@@ -25,9 +25,9 @@ open class BackupArchiveManagerMock: BackupArchiveManager {
 
     public func uploadEncryptedBackup(
         metadata: Upload.EncryptedBackupUploadMetadata,
-        registeredBackupIDToken: BackupIdManager.RegisteredBackupIDToken,
-        localIdentifiers: LocalIdentifiers,
-        auth: ChatServiceAuth
+        registeredBackupIDToken: RegisteredBackupIDToken,
+        auth: ChatServiceAuth,
+        progress: OWSProgressSink?,
     ) async throws -> Upload.Result<Upload.EncryptedBackupUploadMetadata> {
         return Upload.Result(
             cdnKey: "cdnKey",
@@ -36,7 +36,9 @@ open class BackupArchiveManagerMock: BackupArchiveManager {
                 fileUrl: URL(string: "file://")!,
                 digest: Data(),
                 encryptedDataLength: 0,
-                plaintextDataLength: 0),
+                plaintextDataLength: 0,
+                attachmentByteSize: metadata.attachmentByteSize,
+            ),
             beginTimestamp: 0,
             finishTimestamp: Date().ows_millisecondsSince1970
         )
@@ -54,7 +56,8 @@ open class BackupArchiveManagerMock: BackupArchiveManager {
             fileUrl: URL(string: "file://")!,
             digest: Data(),
             encryptedDataLength: 0,
-            plaintextDataLength: 0
+            plaintextDataLength: 0,
+            attachmentByteSize: 0,
         )
     }
 

@@ -53,7 +53,7 @@ public class BackupArchiveChatItemArchiver: BackupArchiveProtoStreamWriter {
     private lazy var attachmentsArchiver = BackupArchiveMessageAttachmentArchiver(
         attachmentManager: attachmentManager,
         attachmentStore: attachmentStore,
-        backupAttachmentDownloadManager: backupAttachmentDownloadManager
+        backupAttachmentDownloadManager: backupAttachmentDownloadManager,
     )
     private lazy var reactionArchiver = BackupArchiveReactionArchiver(
         reactionStore: BackupArchiveReactionStore()
@@ -96,7 +96,7 @@ public class BackupArchiveChatItemArchiver: BackupArchiveProtoStreamWriter {
         interactionStore: BackupArchiveInteractionStore,
         archivedPaymentStore: ArchivedPaymentStore,
         reactionStore: ReactionStore,
-        threadStore: BackupArchiveThreadStore
+        threadStore: BackupArchiveThreadStore,
     ) {
         self.attachmentManager = attachmentManager
         self.attachmentStore = attachmentStore

@@ -36,6 +36,10 @@ public enum ExperienceUpgradeManifest {
     /// soon.
     case inactiveLinkedDeviceReminder
 
+    /// Prompts the user on linked devices about any "inactive" primary devices
+    /// that will expire soon
+    case inactivePrimaryDeviceReminder
+
     /// Prompts the user to enter their PIN, to help ensure they remember it.
     ///
     /// Note that this upgrade stores state in external components, rather than
@@ -47,6 +51,9 @@ public enum ExperienceUpgradeManifest {
 
     /// Prompts the user to enter their backup key, to help ensure they remember it.
     case backupKeyReminder
+
+    /// Prompts the user to enable backups.
+    case enableBackupsReminder
 
     /// An unrecognized upgrade, which should generally be ignored/discarded.
     ///
@@ -112,12 +119,16 @@ extension ExperienceUpgradeManifest {
                 return .createUsernameReminder
             case Self.inactiveLinkedDeviceReminder.uniqueId:
                 return .inactiveLinkedDeviceReminder
+            case Self.inactivePrimaryDeviceReminder.uniqueId:
+                return .inactivePrimaryDeviceReminder
             case Self.pinReminder.uniqueId:
                 return .pinReminder
             case Self.contactPermissionReminder.uniqueId:
                 return .contactPermissionReminder
             case Self.backupKeyReminder.uniqueId:
                 return .backupKeyReminder
+            case Self.enableBackupsReminder.uniqueId:
+                return .enableBackupsReminder
             default:
                 break
             }
@@ -144,9 +155,11 @@ extension ExperienceUpgradeManifest {
         .notificationPermissionReminder,
         .createUsernameReminder,
         .inactiveLinkedDeviceReminder,
+        .inactivePrimaryDeviceReminder,
         .pinReminder,
         .contactPermissionReminder,
-        .backupKeyReminder
+        .backupKeyReminder,
+        .enableBackupsReminder
     ]
 }
 
@@ -170,12 +183,16 @@ extension ExperienceUpgradeManifest {
             return megaphone.id
         case .inactiveLinkedDeviceReminder:
             return "inactiveLinkedDeviceReminder"
+        case .inactivePrimaryDeviceReminder:
+            return "inactivePrimaryDeviceReminder"
         case .pinReminder:
             return "pinReminder"
         case .contactPermissionReminder:
             return "contactPermissionReminder"
         case .backupKeyReminder:
             return "backupKeyReminder"
+        case .enableBackupsReminder:
+            return "enableBackupsReminder"
         case .unrecognized(let uniqueId):
             return uniqueId
         }
@@ -240,12 +257,16 @@ extension ExperienceUpgradeManifest: ExperienceUpgradeSortable {
             return (4, -1 * megaphone.manifest.priority)
         case .inactiveLinkedDeviceReminder:
             return (5, 0)
-        case .pinReminder:
+        case .inactivePrimaryDeviceReminder:
             return (6, 0)
-        case .backupKeyReminder:
+        case .pinReminder:
             return (7, 0)
-        case .contactPermissionReminder:
+        case .backupKeyReminder:
             return (8, 0)
+        case .enableBackupsReminder:
+            return (9, 0)
+        case .contactPermissionReminder:
+            return (10, 0)
         case .unrecognized:
             return (Int.max, Int.max)
         }
@@ -269,13 +290,15 @@ extension ExperienceUpgradeManifest {
                 .introducingPins,
                 .createUsernameReminder,
                 .remoteMegaphone,
-                .inactiveLinkedDeviceReminder:
+                .inactiveLinkedDeviceReminder,
+                .inactivePrimaryDeviceReminder:
             return false
         case
                 .notificationPermissionReminder,
                 .pinReminder,
                 .contactPermissionReminder,
                 .backupKeyReminder,
+                .enableBackupsReminder,
                 .unrecognized:
             return true
         }
@@ -290,14 +313,16 @@ extension ExperienceUpgradeManifest {
                 .newLinkedDeviceNotification,
                 .introducingPins,
                 .pinReminder,
-                .backupKeyReminder,
                 .unrecognized:
             return false
         case
                 .notificationPermissionReminder,
                 .createUsernameReminder,
                 .inactiveLinkedDeviceReminder,
+                .inactivePrimaryDeviceReminder,
                 .remoteMegaphone,
+                .enableBackupsReminder,
+                .backupKeyReminder,
                 .contactPermissionReminder:
             return true
         }
@@ -315,9 +340,11 @@ extension ExperienceUpgradeManifest {
                 .notificationPermissionReminder,
                 .createUsernameReminder,
                 .inactiveLinkedDeviceReminder,
+                .inactivePrimaryDeviceReminder,
                 .pinReminder,
                 .contactPermissionReminder,
                 .backupKeyReminder,
+                .enableBackupsReminder,
                 .unrecognized:
             return false
         case .remoteMegaphone:
@@ -342,6 +369,8 @@ extension ExperienceUpgradeManifest {
                 .notificationPermissionReminder,
                 .inactiveLinkedDeviceReminder:
             return 3 * .day
+        case .inactivePrimaryDeviceReminder:
+            return 7 * .day
         case
                 .newLinkedDeviceNotification,
                 .createUsernameReminder:
@@ -384,6 +413,8 @@ extension ExperienceUpgradeManifest {
             return Double(daysToSnooze) * .day
         case .contactPermissionReminder:
             return 30 * .day
+        case .enableBackupsReminder:
+            return snoozeCount == 1 ? 30 * .day : 90 * .day
         case .unrecognized:
             return .infinity
         }
@@ -399,9 +430,11 @@ extension ExperienceUpgradeManifest {
                 .notificationPermissionReminder,
                 .createUsernameReminder,
                 .inactiveLinkedDeviceReminder,
+                .inactivePrimaryDeviceReminder,
                 .pinReminder,
                 .contactPermissionReminder,
-                .backupKeyReminder:
+                .backupKeyReminder,
+                .enableBackupsReminder:
             return Int.max
         case .remoteMegaphone(let megaphone):
             return megaphone.manifest.showForNumberOfDays
@@ -420,6 +453,7 @@ extension ExperienceUpgradeManifest {
                 .notificationPermissionReminder,
                 .createUsernameReminder,
                 .inactiveLinkedDeviceReminder,
+                .inactivePrimaryDeviceReminder,
                 .contactPermissionReminder:
             return .day
         case .introducingPins:
@@ -441,6 +475,8 @@ extension ExperienceUpgradeManifest {
             return 8 * .hour
         case .backupKeyReminder:
             return 8 * .hour
+        case .enableBackupsReminder:
+            return 7 * .day
         case .unrecognized:
             return .infinity
         }
@@ -455,9 +491,11 @@ extension ExperienceUpgradeManifest {
                 .notificationPermissionReminder,
                 .createUsernameReminder,
                 .inactiveLinkedDeviceReminder,
+                .inactivePrimaryDeviceReminder,
                 .pinReminder,
                 .contactPermissionReminder,
-                .backupKeyReminder:
+                .backupKeyReminder,
+                .enableBackupsReminder:
             return Date.distantFuture
         case .remoteMegaphone(let megaphone):
             return Date(timeIntervalSince1970: TimeInterval(megaphone.manifest.dontShowAfter))
@@ -476,11 +514,13 @@ extension ExperienceUpgradeManifest {
                 .inactiveLinkedDeviceReminder,
                 .contactPermissionReminder,
                 .backupKeyReminder,
+                .enableBackupsReminder,
                 .unrecognized:
             return false
         case
                 .notificationPermissionReminder,
-                .createUsernameReminder:
+                .createUsernameReminder,
+                .inactivePrimaryDeviceReminder:
             return true
         case
                 .remoteMegaphone:
@@ -608,6 +648,14 @@ extension ExperienceUpgradeManifest {
         return DependenciesBridge.shared.inactiveLinkedDeviceFinder.hasInactiveLinkedDevice(tx: tx)
     }
 
+    public static func checkPreconditionsForInactivePrimaryDeviceReminder(tx: DBReadTransaction) -> Bool {
+        if FeatureFlags.inactivePrimaryDeviceMegaphone {
+            return DependenciesBridge.shared.inactivePrimaryDeviceStore.valueForInactivePrimaryDeviceAlert(transaction: tx)
+        }
+
+        return false
+    }
+
     public static func checkPreconditionsForPinReminder(transaction: DBReadTransaction) -> Bool {
         return SSKEnvironment.shared.ows2FAManagerRef.isDueForV2Reminder(transaction: transaction)
     }
@@ -627,11 +675,17 @@ extension ExperienceUpgradeManifest {
     }
 
     public static func checkPreconditionsForBackupKeyReminder(transaction: DBReadTransaction) -> Bool {
-        let backupSettingsStore = BackupSettingsStore()
-        let backupPlan = backupSettingsStore.backupPlan(tx: transaction)
-
-        guard backupPlan != BackupPlan.disabled else {
+        guard FeatureFlags.Backups.settings else {
             return false
+        }
+
+        let backupSettingsStore = BackupSettingsStore()
+
+        switch backupSettingsStore.backupPlan(tx: transaction) {
+        case .disabled, .disabling:
+            return false
+        case .free, .paid, .paidExpiringSoon, .paidAsTester:
+            break
         }
 
         guard let firstBackupDate = backupSettingsStore.firstBackupDate(tx: transaction) else {
@@ -649,6 +703,22 @@ extension ExperienceUpgradeManifest {
 
         // Return true if there's been no reminder within 6 months.
         return lastReminderDate < Date().addingTimeInterval(-180 * 24 * 60 * 60)
+    }
+
+    public static func checkPreconditionsForBackupEnablementReminder(transaction: DBReadTransaction) -> Bool {
+        guard FeatureFlags.Backups.settings else {
+            return false
+        }
+
+        let backupPlan = BackupSettingsStore().backupPlan(tx: transaction)
+        switch backupPlan {
+        case .disabling, .free, .paid, .paidExpiringSoon, .paidAsTester:
+            return false
+        case .disabled:
+            break
+        }
+
+        return InteractionFinder.outgoingAndIncomingMessageCount(transaction: transaction, limit: 1) >= 1
     }
 
     // MARK: Remote megaphone preconditions
